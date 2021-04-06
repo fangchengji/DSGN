@@ -5,5 +5,5 @@ python3 ./tools/train_net.py \
   --lr_scale 50 \
   --epochs 60 \
   -btrain 4 \
-  -d 0-3 \
+  -d 6-7 \
   --multiprocessing-distributed 

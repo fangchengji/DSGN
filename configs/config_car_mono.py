@@ -4,7 +4,7 @@ from yacs.config import CfgNode as CN
 
 cfg = CN()
 
-cfg.mono = False
+cfg.mono = True
 
 cfg.cnt = 0
 
@@ -31,19 +31,20 @@ cfg.downsample_disp = 4
 #------------- depth ---------------#
 cfg.eval_depth = True # test
 cfg.depth_interval = 0.2 # (meters)
-cfg.depth_min_intervals = 10
+cfg.depth_min_intervals = 10    # the nearest distance: 10 * 0.2 = 2 m
 
-cfg.max_depth = (cfg.maxdisp + cfg.depth_min_intervals) * cfg.depth_interval
-cfg.min_depth = cfg.depth_min_intervals * cfg.depth_interval
+cfg.max_depth = (cfg.maxdisp + cfg.depth_min_intervals) * cfg.depth_interval     # 40.4 m   
+cfg.min_depth = cfg.depth_min_intervals * cfg.depth_interval            # 2m
 
 cfg.loss_disp = True
-cfg.flip = True
+cfg.flip = False
 
 #------------- detection ---------------#
 cfg.RPN_CONVDIM = 32
 cfg.RPN_ONEMORE_CONV = True
 cfg.RPN_ONEMORE_DIM = 64
-cfg.RPN3D_ENABLE = True
+cfg.RPN3D_ENABLE = False    
+
 cfg.RPN3D = CN()
 cfg.RPN3D.ANCHORS_Y = [0.74, 0.825, 0.74]
 cfg.RPN3D.ANCHORS_HEIGHT = [1.73, 1.56, 1.73]
@@ -141,6 +142,6 @@ cfg.fix_centerness_bug = True
 # network
 cfg.backbone = 'reslike-det-small'
 
-cfg.PlaneSweepVolume = True
+cfg.PlaneSweepVolume = False
 
 

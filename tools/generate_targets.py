@@ -52,16 +52,16 @@ class BatchCollator(object):
     def __call__(self, batch):
         transpose_batch = list(zip(*batch))
         l = torch.cat(transpose_batch[0], dim=0)
-        r = torch.cat(transpose_batch[1], dim=0)
+        r = torch.cat(transpose_batch[1], dim=0) if transpose_batch[1][0] is not None else transpose_batch[1]
         disp = torch.stack(transpose_batch[2], dim=0)
         calib = transpose_batch[3]
-        calib_R = transpose_batch[4]
+        calib_R = transpose_batch[4] 
         image_sizes = transpose_batch[5]
         image_indexes = transpose_batch[6]
-        outputs = [l, r, disp, calib, calib_R, image_sizes, image_indexes]
+        # outputs = [l, r, disp, calib, calib_R, image_sizes, image_indexes]
         return [l, r, disp, calib, calib_R, image_sizes, image_indexes]
 
-ImageFloader = DA.myImageFloder(all_left_img, all_right_img, all_left_disp, False, split=args.split_file, cfg=cfg,
+ImageFloader = DA.myImageFloder(all_left_img, all_right_img, all_left_disp, training=False, split=args.split_file, cfg=cfg,
     generate_target=True)
 
 TestImgLoader = torch.utils.data.DataLoader(

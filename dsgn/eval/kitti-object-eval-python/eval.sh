@@ -7,7 +7,7 @@ else
 fi
 echo $class
 python3 evaluate.py evaluate \
-    --label_path=/mnt/home/ylchen/ylchen/dataset/KITTI_DATASET/kitti_detection/training/label_2/ \
+    --label_path=/chj/jifangcheng/datasets/kitti/training/label_2/ \
     --result_path=$1 \
     --current_class=$class --coco=False
 

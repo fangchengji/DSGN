@@ -238,6 +238,15 @@ class Calibration(object):
         data['P2'] = cam2cam['P_rect_02']
         return data
 
+    def flip_horizon(self, img_width):
+        # update Projection matrix
+        self.P[0, 2] = img_width - self.P[0, 2]                 # cx' = w - cx
+        self.P[0, 3] = img_width * self.P[2, 3] - self.P[0, 3]  # tx' = w*tz - t
+
+        # update variable
+        self.c_u = self.P[0, 2]
+        self.b_x = self.P[0, 3] / (-self.f_u)           # relative
+
     def cart2hom(self, pts_3d):
         ''' Input: nx3 points in Cartesian
             Oupput: nx4 points in Homogeneous by pending 1

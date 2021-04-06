@@ -41,6 +41,23 @@ def convert_to_viewpoint_torch(alpha, z, x):
 def convert_to_ry_torch(alpha, z, x):
     return alpha - torch.atan2(z, x) + np.pi / 2
 
+def project_depth_map_to_rect_point(calib, depth, cfg):
+    # depth[depth < 0] = 0
+    mask = depth > 0
+    rows, cols = depth.shape
+    c, r = np.meshgrid(np.arange(cols), np.arange(rows))
+    points = np.stack([c, r, depth])
+    points = points.reshape((3, -1))
+    points = points.T
+    points = points[mask.reshape(-1)]
+    cloud = calib.project_image_to_rect(points)
+    valid = (cloud[:, 2] >= cfg.Z_MAX) & (cloud[:, 2] < cfg.Z_MIN) & \
+            (cloud[:, 0] > cfg.X_MIN) & (cloud[:, 0] < cfg.X_MAX) & \
+            (cloud[:, 1] > cfg.Y_MAX) & (cloud[:, 1] < cfg.Y_MIN)
+
+    return cloud[valid]
+
+
 class myImageFloder(data.Dataset):
     def __init__(self, left, right, left_disparity, training, loader=default_loader, dploader=disparity_loader, 
             split=None, cfg=None, generate_target=False):
@@ -53,6 +70,7 @@ class myImageFloder(data.Dataset):
         self.cfg = cfg
         self.num_classes = self.cfg.num_classes
         self.num_angles = self.cfg.num_angles
+        self.mono = self.cfg.mono
 
         if 'train.txt' in split:
             self.kitti_dataset = kitti_dataset('train').train_dataset
@@ -85,12 +103,16 @@ class myImageFloder(data.Dataset):
             if self.less_human:
                 self.save_path += '_lesshuman'
 
+        if self.mono:
+            self.save_path += '_mono'
+
         if self.generate_target:
             os.system('mkdir {}'.format(self.save_path))
 
     def __getitem__(self, index):
         left = self.left[index]
-        right = self.right[index]
+        if not self.mono:
+            right = self.right[index]
         disp_L = self.disp_L[index]
 
         image_index = int(left.split('/')[-1].split('.')[0])
@@ -102,26 +124,36 @@ class myImageFloder(data.Dataset):
                 self.flip_this_image = False
         else:
             if self.flip and self.training:
-                self.flip_this_image = np.random.randint(2) > 0.5
+                self.flip_this_image = np.random.randint(2) > 0.5   # 0, 1
             else:
                 self.flip_this_image = False
 
         calib = self.kitti_dataset.get_calibration(image_index)
-        calib_R = self.kitti_dataset.get_right_calibration(image_index)
-        
-        if self.flip_this_image:
-            calib, calib_R = calib_R, calib
-
-        baseline = np.fabs(calib.P[0,3]-calib_R.P[0,3])/calib.P[0,0] # ~ 0.54
-        t_cam2_from_cam0 = calib.t_cam2_from_cam0
-
         left_img = self.loader(left)
-        right_img = self.loader(right)
-        if not self.flip_this_image:
-            dataL = self.dploader(disp_L)
+        dataL = self.dploader(disp_L)
+
+        if not self.mono:
+            calib_R = self.kitti_dataset.get_right_calibration(image_index)
+            right_img = self.loader(right)
+            if self.flip_this_image:
+                calib, calib_R = calib_R, calib
+                left_img, right_img = hflip(right_img), hflip(left_img)
+
+                disp_R = disp_L[:-4] + '_r.npy'
+                dataL = self.dploader(disp_R)
+                dataL = np.ascontiguousarray(dataL[:, ::-1])
+
+            baseline = np.fabs(calib.P[0,3]-calib_R.P[0,3])/calib.P[0,0] # ~ 0.54
+            t_cam2_from_cam0 = calib.t_cam2_from_cam0
         else:
-            disp_R = disp_L[:-4] + '_r.npy'
-            dataL = self.dploader(disp_R)
+            if self.flip_this_image:
+                # flip the image and depth map
+                left_img = hflip(left_img)
+                dataL = np.ascontiguousarray(dataL[:, ::-1])
+
+                # TODO: Flip the calib
+                width, _ = left_img.size
+                calib.flip_horizon(width)
 
         # box labels
         if self.training or self.generate_target:
@@ -154,12 +186,17 @@ class myImageFloder(data.Dataset):
                         h, w, l, x, y, z, alpha = torch.split(box3ds, [1,1,1,1,1,1,1], 1)
                         box3ds[:, 6:] = convert_to_viewpoint_torch(alpha, z, x)
 
-                    target = Box3DList(boxes, left_img.size, mode="xyxy", box3d=box3ds, Proj=calib.P, Proj_R=calib_R.P)
+                    target = Box3DList(boxes, 
+                                       left_img.size, 
+                                       mode="xyxy", 
+                                       box3d=box3ds, 
+                                       Proj=calib.P, 
+                                       Proj_R=calib_R.P if not self.mono else None)
                     classes = torch.as_tensor(ori_classes)
                     target.add_field('labels', classes)
 
                     if self.flip_this_image:
-                        target = target.transpose(0)
+                        target = target.transpose(0)    # FLIP_LEFT_RIGHT
 
                     if not self.flip_this_image:
                         save_file = '{}/{:06d}.npz'.format(self.save_path, image_index)
@@ -197,7 +234,12 @@ class myImageFloder(data.Dataset):
                             anchors = torch.cat([hwl, locations3d, angles[:, :, None]], dim=2)
                             anchors[:, :, 4] += anchors[:, :, 0] / 2.
                             anchors = anchors.reshape(-1, 7)
-                            anchors_boxlist = Box3DList(torch.zeros(len(anchors), 4), left_img.size, mode='xyxy', box3d=anchors, Proj=calib.P, Proj_R=calib_R.P)
+                            anchors_boxlist = Box3DList(torch.zeros(len(anchors), 4), 
+                                                        left_img.size, 
+                                                        mode='xyxy', 
+                                                        box3d=anchors, 
+                                                        Proj=calib.P, 
+                                                        Proj_R=calib_R.P if not self.mono else None)
 
                             inds_this_class = target.get_field('labels') == cls
                             target_box3ds = target.box3d[inds_this_class]
@@ -238,25 +280,29 @@ class myImageFloder(data.Dataset):
 
         w, h = left_img.size
 
-        if self.flip_this_image:
-            left_img, right_img = hflip(right_img), hflip(left_img)
-            dataL = np.ascontiguousarray(dataL[:, ::-1])
-
         processed = preprocess.get_transform(augment=False)
         left_img = processed(left_img)
-        right_img = processed(right_img)
         left_img = torch.reshape(left_img,[1,3,left_img.shape[1],left_img.shape[2]])
-        right_img = torch.reshape(right_img,[1,3,right_img.shape[1],right_img.shape[2]])
 
         img_size = (left_img.shape[2], left_img.shape[3])
 
-        top_pad = 384-left_img.shape[2]
-        left_pad = 1248-left_img.shape[3]
+        bottom_pad = 384-left_img.shape[2]
+        right_pad = 1248-left_img.shape[3]
 
-        left_img = F.pad(left_img,(0,left_pad, 0,top_pad),'constant',0)
-        right_img = F.pad(right_img,(0,left_pad, 0,top_pad),'constant',0)
+        left_img = F.pad(left_img,(0, right_pad, 0, bottom_pad),'constant',0)
 
-        dataL = F.pad(torch.as_tensor(dataL), (0,left_pad, 0,top_pad), 'constant', -389.63037)
+        depth_points = project_depth_map_to_rect_point(calib, dataL, self.cfg)
+        depth_points = torch.from_numpy(depth_points)
+
+        dataL = F.pad(torch.as_tensor(dataL), (0, right_pad, 0, bottom_pad), 'constant', -389.63037)
+
+        if not self.mono:
+            right_img = processed(right_img)
+            right_img = torch.reshape(right_img,[1,3,right_img.shape[1],right_img.shape[2]])
+            right_img = F.pad(right_img,(0, right_pad, 0, bottom_pad),'constant', 0)
+        else:
+            right_img = None
+            calib_R = None
 
         outputs = [left_img, right_img, dataL, calib, calib_R]
 
@@ -267,6 +313,10 @@ class myImageFloder(data.Dataset):
             if self.cfg.RPN3D_ENABLE:
                 outputs.append(iou)
                 outputs.append(labels_map)
+            if self.mono:
+                outputs.append(depth_points)
+                outputs.append(self.flip_this_image)
+                outputs.append(img_size)
         else:
             outputs.extend([img_size, image_index])
 

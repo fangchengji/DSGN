@@ -1,0 +1,39 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+        },
+        {
+            "name": "Python: generate_target",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceRoot}/tools/generate_targets.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--cfg", "configs/config_car_mono.py",
+            ]
+        },
+        {
+            "name": "Python: trian",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceRoot}/tools/train_net.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--cfg", "configs/config_car_mono.py",
+                "--savemodel", "./outputs/dsgn_car_mono",
+                "-btrain",  "2",
+                "-d", "7",
+                "--loadmodel", "./outputs/dsgn_car_mono/finetune_53.tar"
+            ]
+        }
+    ]
+}

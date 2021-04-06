@@ -399,30 +399,30 @@ class Box3DList(BoxList):
             Proj = Proj.cuda()
         return project_rect_to_image(self.box_center3ds, Proj)
 
-    def box_corners2d(self, clip_image=True, return_right=False):
-        box_corners3d = self.box_corners() + self.box3d[:, [3,4,5]][:, None, :]
-        Proj = torch.as_tensor(self.Proj, dtype=torch.float32)
-        if box_corners3d.is_cuda:
-            Proj = Proj.cuda()
-        box_corners2d = project_rect_to_image(box_corners3d.reshape(-1,3), Proj)
-        box_corners2d = box_corners2d.reshape(-1, 8, 2)
-        box_corners2d = torch.cat([box_corners2d.min(dim=1)[0], box_corners2d.max(dim=1)[0]], dim=1)
-        if clip_image:
-            box_corners2d[:, [0, 2]] = box_corners2d[:, [0, 2]].clamp(min=0., max=self.size[0])
-            box_corners2d[:, [1, 3]] = box_corners2d[:, [1, 3]].clamp(min=0., max=self.size[1])
+    # def box_corners2d(self, clip_image=True, return_right=False):
+    #     box_corners3d = self.box_corners() + self.box3d[:, [3,4,5]][:, None, :]
+    #     Proj = torch.as_tensor(self.Proj, dtype=torch.float32)
+    #     if box_corners3d.is_cuda:
+    #         Proj = Proj.cuda()
+    #     box_corners2d = project_rect_to_image(box_corners3d.reshape(-1,3), Proj)
+    #     box_corners2d = box_corners2d.reshape(-1, 8, 2)
+    #     box_corners2d = torch.cat([box_corners2d.min(dim=1)[0], box_corners2d.max(dim=1)[0]], dim=1)
+    #     if clip_image:
+    #         box_corners2d[:, [0, 2]] = box_corners2d[:, [0, 2]].clamp(min=0., max=self.size[0])
+    #         box_corners2d[:, [1, 3]] = box_corners2d[:, [1, 3]].clamp(min=0., max=self.size[1])
 
-        if return_right:
-            Proj_R = torch.as_tensor(self.Proj_R, dtype=torch.float32)
-            if box_corners3d.is_cuda:
-                Proj_R = Proj_R.cuda()
-            box_corners2d_R = project_rect_to_image(box_corners3d.reshape(-1,3), Proj_R)
-            box_corners2d_R = box_corners2d_R.reshape(-1, 8, 2)
-            box_corners2d_R = torch.cat([box_corners2d_R.min(dim=1)[0], box_corners2d_R.max(dim=1)[0]], dim=1)
-            if clip_image:
-                box_corners2d_R[:, [0, 2]] = box_corners2d_R[:, [0, 2]].clamp(min=0., max=self.size[0])
-                box_corners2d_R[:, [1, 3]] = box_corners2d_R[:, [1, 3]].clamp(min=0., max=self.size[1])
-            return box_corners2d, box_corners2d_R
-        return box_corners2d
+    #     if return_right:
+    #         Proj_R = torch.as_tensor(self.Proj_R, dtype=torch.float32)
+    #         if box_corners3d.is_cuda:
+    #             Proj_R = Proj_R.cuda()
+    #         box_corners2d_R = project_rect_to_image(box_corners3d.reshape(-1,3), Proj_R)
+    #         box_corners2d_R = box_corners2d_R.reshape(-1, 8, 2)
+    #         box_corners2d_R = torch.cat([box_corners2d_R.min(dim=1)[0], box_corners2d_R.max(dim=1)[0]], dim=1)
+    #         if clip_image:
+    #             box_corners2d_R[:, [0, 2]] = box_corners2d_R[:, [0, 2]].clamp(min=0., max=self.size[0])
+    #             box_corners2d_R[:, [1, 3]] = box_corners2d_R[:, [1, 3]].clamp(min=0., max=self.size[1])
+    #         return box_corners2d, box_corners2d_R
+    #     return box_corners2d
 
     @classmethod
     def fromboxlist(cls, boxlist, box3d, Proj, Proj_R=None):

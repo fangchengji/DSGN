@@ -153,6 +153,8 @@ class feature_extraction(nn.Module):
         self.rpn_onemore_dim = getattr(self.cfg, 'RPN_ONEMORE_DIM', 256)
         self.img_feature_relu = getattr(self.cfg, 'img_feature_relu', True)
         self.branch = getattr(self.cfg, 'branch', True)
+        self.mono = getattr(self.cfg, 'mono', False)
+        self.out_channels = 64 if self.mono else 32
 
         self.backbone = getattr(self.cfg, 'backbone', 'reslike-det-small')
         if self.backbone == 'reslike-det':
@@ -165,8 +167,8 @@ class feature_extraction(nn.Module):
             first_dim = 64
             dims = [32, 64, 128, 192]
             nr_convs = [3, 6, 12, 4]
-            branch_dim = 32
-            lastconv_dim = [256, 32]
+            branch_dim = self.out_channels
+            lastconv_dim = [256, self.out_channels]
         elif self.backbone == 'reslike-det-small-fixfirst':
             first_dim = 16
             dims = [32, 64, 128, 192]
@@ -225,7 +227,7 @@ class feature_extraction(nn.Module):
             concat_dim = dims[1] + dims[3] + dims[2]
 
         self.PlaneSweepVolume = getattr(cfg, 'PlaneSweepVolume', True)
-        if self.PlaneSweepVolume:
+        if self.PlaneSweepVolume or self.mono:
             self.lastconv = nn.Sequential(convbn(concat_dim, lastconv_dim[0], 3, 1, 1, 1, gn=cfg.GN),
                                           nn.ReLU(inplace=True),
                                           nn.Conv2d(lastconv_dim[0], lastconv_dim[1], kernel_size=1, padding=0, stride = 1, bias=False))
@@ -233,8 +235,8 @@ class feature_extraction(nn.Module):
         if self.cfg.RPN3D_ENABLE and self.cat_img_feature:
             if self.rpn_onemore_conv:
                 rpnconvs = [convbn(concat_dim, self.rpn_onemore_dim, 3, 1, 1, 1, gn=cfg.GN),
-                                          nn.ReLU(inplace=True),
-                                          convbn(self.rpn_onemore_dim, self.cfg.RPN_CONVDIM, 3, 1, 1, 1, gn=cfg.GN, groups=(32 if self.cfg.RPN_CONVDIM % 32 == 0 else 16))]
+                                   nn.ReLU(inplace=True),
+                                   convbn(self.rpn_onemore_dim, self.cfg.RPN_CONVDIM, 3, 1, 1, 1, gn=cfg.GN, groups=(32 if self.cfg.RPN_CONVDIM % 32 == 0 else 16))]
             else:
                 rpnconvs = [convbn(concat_dim, self.cfg.RPN_CONVDIM, 3, 1, 1, 1, gn=cfg.GN, groups=(32 if self.cfg.RPN_CONVDIM % 32 == 0 else 16))]
             if self.img_feature_relu:
@@ -287,7 +289,7 @@ class feature_extraction(nn.Module):
         else:
             rpn_feature = None
 
-        if self.PlaneSweepVolume:
+        if self.PlaneSweepVolume or self.mono:
             output_feature = self.lastconv(concat_feature) ; #print('last', output_feature.shape)
         else:
             output_feature = None

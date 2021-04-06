@@ -23,9 +23,9 @@ def project_rect_to_image(pts_3d_rect, P):
     pts_2d[:,1] /= pts_2d[:,2]
     return pts_2d[:,0:2]
 
-class StereoNet(nn.Module):
+class MonoNet(nn.Module):
     def __init__(self, cfg=None):
-        super(StereoNet, self).__init__()
+        super(MonoNet, self).__init__()
         self.maxdisp = cfg.maxdisp
         self.downsample_disp = cfg.downsample_disp
         self.cfg = cfg
@@ -45,37 +45,26 @@ class StereoNet(nn.Module):
         self.rpn3d_conv_kernel = getattr(self.cfg, 'rpn3d_conv_kernel', 3)
         self.mono = cfg.mono
 
-        if self.PlaneSweepVolume:
-            self.build_cost = BuildCostVolume()
-
         self.anchor_angles = torch.as_tensor(self.cfg.ANCHOR_ANGLES)
         self.num_angles = self.cfg.num_angles
 
         self.feature_extraction = feature_extraction(cfg)
 
         res_dim = 64
-        if self.PlaneSweepVolume:
-            if not self.hg_firstconv:
-                self.dres0 = nn.Sequential(convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN),
-                                           nn.ReLU(inplace=True),
-                                           convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN),
-                                           nn.ReLU(inplace=True))
+        self.dres0 = nn.Sequential(convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN),
+                                   nn.ReLU(inplace=True),
+                                   convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN),
+                                   nn.ReLU(inplace=True))
 
-                self.dres1 = nn.Sequential(convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN),
-                                           nn.ReLU(inplace=True),
-                                           convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN))
-            else:
-                self.dres0 = hourglass(res_dim, gn=cfg.GN)
+        self.dres1 = nn.Sequential(convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN),
+                                   nn.ReLU(inplace=True),
+                                   convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN))
 
-            self.hg_cv = self.cfg.hg_cv
+        self.dres2 = hourglass(res_dim, gn=cfg.GN)
 
-            if self.hg_cv:
-                self.dres2 = hourglass(res_dim, gn=cfg.GN)
-
-            if self.loss_disp:
-                self.classif1 = nn.Sequential(convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN),
-                                              nn.ReLU(inplace=True),
-                                              nn.Conv3d(res_dim, 1, kernel_size=3, padding=1, stride=1, bias=False))
+        self.classif1 = nn.Sequential(convbn_3d(res_dim, res_dim, 3, 1, 1, gn=cfg.GN),
+                                      nn.ReLU(inplace=True),
+                                      nn.Conv3d(res_dim, 1, kernel_size=3, padding=1, stride=1, bias=False))
 
         self.cat_disp = getattr(self.cfg, 'cat_disp', False)
         self.cat_img_feature = getattr(self.cfg, 'cat_img_feature', False)
@@ -206,7 +195,7 @@ class StereoNet(nn.Module):
             depth[self.maxdisp - 1 - i] = (i+self.cfg.depth_min_intervals) * self.cfg.depth_interval
         self.depth = depth
 
-        self.dispregression = disparityregression(self.maxdisp, cfg=self.cfg)
+        # self.dispregression = disparityregression(self.maxdisp, cfg=self.cfg)
 
         self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN = cfg.CV_X_MIN, cfg.CV_Y_MIN, cfg.CV_Z_MIN
         self.CV_X_MAX, self.CV_Y_MAX, self.CV_Z_MAX = cfg.CV_X_MAX, cfg.CV_Y_MAX, cfg.CV_Z_MAX
@@ -222,97 +211,124 @@ class StereoNet(nn.Module):
         coord_rect = torch.stack([xs, ys, zs], dim=-1)
         self.coord_rect = coord_rect
 
+        # lower_zs = zs - self.VOXEL_Z_SIZE / 2       # lower boundary
+        # self.lower_coord_rect = torch.stack([xs, ys, lower_zs], dim=-1)
+
+        # upper_zs = zs + self.VOXEL_Z_SIZE / 2       # upper boundary
+        # self.upper_coord_rect = torch.stack([xs, ys, upper_zs], dim=-1)
+
     def forward(self, left, right, calibs_fu, calibs_baseline, calibs_Proj, calibs_Proj_R=None):
         N = left.shape[0]
 
         refimg_fea, left_rpn_feature = self.feature_extraction(left)
-        if not self.mono:
-            targetimg_fea, right_rpn_feature = self.feature_extraction(right)
 
         outputs = dict()
 
-        if self.PlaneSweepVolume:
-            affine_mat = self.affine_mat.cuda().clone().unsqueeze(0).repeat(N, 1, 1, 1)
-            affine_mat[:, :, 0, 2] = affine_mat[:, :, 0, 2] * calibs_fu[:,None].cuda().float() * calibs_baseline[:,None].cuda().float() / self.default_scale
-            cost = self.build_cost(refimg_fea, targetimg_fea, affine_mat[:,:,0,2])
-            cost = cost.contiguous()
+        # if self.PlaneSweepVolume:
+        #     affine_mat = self.affine_mat.cuda().clone().unsqueeze(0).repeat(N, 1, 1, 1)
+        #     affine_mat[:, :, 0, 2] = affine_mat[:, :, 0, 2] * calibs_fu[:,None].cuda().float() * calibs_baseline[:,None].cuda().float() / self.default_scale
+        #     cost = self.build_cost(refimg_fea, targetimg_fea, affine_mat[:,:,0,2])
+        #     cost = cost.contiguous()
 
-            if not self.hg_firstconv:
-                cost0 = self.dres0(cost)
-                cost0 = self.dres1(cost0) + cost0
-            else:
-                out0, pre0, post0 = self.dres0(cost, None, None)
-                cost0 = out0
+        #     if not self.hg_firstconv:
+        #         cost0 = self.dres0(cost)
+        #         cost0 = self.dres1(cost0) + cost0
+        #     else:
+        #         out0, pre0, post0 = self.dres0(cost, None, None)
+        #         cost0 = out0
 
-            if self.hg_cv:
-                out1, pre1, post1 = self.dres2(cost0, None, None)
-                out1 = out1 + cost0
-                if self.loss_disp:
-                    cost1 = self.classif1(out1)
-                else:
-                    cost1 = None
+        #     if self.hg_cv:
+        #         out1, pre1, post1 = self.dres2(cost0, None, None)
+        #         out1 = out1 + cost0
+        #         if self.loss_disp:
+        #             cost1 = self.classif1(out1)
+        #         else:
+        #             cost1 = None
 
-                out, cost = out1, cost1
-            else:
-                out0 = cost0
-                if self.loss_disp:
-                    cost0 = self.classif1(out0)
-                else:
-                    cost0 = None
+        #         out, cost = out1, cost1
+        #     else:
+        #         out0 = cost0
+        #         if self.loss_disp:
+        #             cost0 = self.classif1(out0)
+        #         else:
+        #             cost0 = None
 
-                out, cost = out0, cost0
-            
-        outputs['depth_preds'] = []
+        #         out, cost = out0, cost0
+    
+        # Note: x: -30.4 -> 30.4; y: 3 -> -1; z: 40.4 -> 2 !!!!!!
+        # so the left top corner is (-30.3, 2.9, 40.3), right bottom corner is (30.3, -0.9, 2.1)
+        coord_rect = self.coord_rect.cuda()
 
-        if self.PlaneSweepVolume and self.loss_disp:
-            if self.hg_cv:
-                cost1 = F.upsample(cost1, [self.maxdisp, left.size()[2], left.size()[3]], mode='trilinear', align_corners=self.cfg.align_corners)
-                cost1 = torch.squeeze(cost1, 1)
-                pred1_softmax = F.softmax(cost1, dim=1)
-                pred1 = self.dispregression(pred1_softmax, depth=self.depth.cuda())
-                if self.training:
-                    outputs['depth_preds'].append( pred1 )
-                else:
-                    outputs['depth_preds'] = pred1
-            else:
-                cost0 = F.upsample(cost0, [self.maxdisp, left.size()[2], left.size()[3]], mode='trilinear', align_corners=self.cfg.align_corners)
-                cost0 = torch.squeeze(cost0, 1)
-                pred1_softmax = F.softmax(cost0, dim=1)
-                pred1 = self.dispregression(pred1_softmax, depth=self.depth.cuda())
-                if self.training:
-                    outputs['depth_preds'].append( pred1 )
-                else:
-                    outputs['depth_preds'] = pred1
+        norm_coord_imgs = []
+        for i in range(N):
+            coord_img = torch.as_tensor(
+                project_rect_to_image(
+                    coord_rect.reshape(-1, 3), 
+                    calibs_Proj[i].float().cuda()
+                ).reshape(*self.coord_rect.shape[:3], 2), 
+            dtype=torch.float32)
 
-        if self.cfg.RPN3D_ENABLE:
-            coord_rect = self.coord_rect.cuda()
+            coord_img = torch.cat([coord_img, self.coord_rect[..., 2:]], dim=-1)    # cat zs to image coord point
+            # Note: there is an align corner implement when calculating the axises width!
+            norm_coord_img = (coord_img - torch.as_tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN])[None, None, None, :]) / \
+                (torch.as_tensor([self.CV_X_MAX, self.CV_Y_MAX, self.CV_Z_MAX]) - torch.as_tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN]))[None, None, None, :]
+            norm_coord_img = norm_coord_img * 2. - 1.   # shift to [-1, 1]
+            norm_coord_imgs.append(norm_coord_img)
+        norm_coord_imgs = torch.stack(norm_coord_imgs, dim=0)
+        norm_coord_imgs = norm_coord_imgs.cuda()
 
-            norm_coord_imgs = []
-            for i in range(N):
-                coord_img = torch.as_tensor(
-                    project_rect_to_image(
-                        coord_rect.reshape(-1, 3), 
-                        calibs_Proj[i].float().cuda()
-                    ).reshape(*self.coord_rect.shape[:3], 2), 
-                dtype=torch.float32)
+        outputs['norm_coord_imgs'] = norm_coord_imgs
+        outputs['coord_rect'] = coord_rect
 
-                coord_img = torch.cat([coord_img, self.coord_rect[..., 2:]], dim=-1)    # cat zs to image coord point
-                # Note: there is an align corner implement when calculating the axises width!
-                norm_coord_img = (coord_img - torch.as_tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN])[None, None, None, :]) / \
-                    (torch.as_tensor([self.CV_X_MAX, self.CV_Y_MAX, self.CV_Z_MAX]) - torch.as_tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN]))[None, None, None, :]
-                norm_coord_img = norm_coord_img * 2. - 1.   # shift to [-1, 1]
-                norm_coord_imgs.append(norm_coord_img)
-            norm_coord_imgs = torch.stack(norm_coord_imgs, dim=0)
-            norm_coord_imgs = norm_coord_imgs.cuda()
+        outputs['occupancy_preds'] = []
 
-            outputs['norm_coord_imgs'] = norm_coord_imgs
-            outputs['coord_rect'] = coord_rect
-
-            valids = (norm_coord_imgs[..., 0] >= -1.) & (norm_coord_imgs[..., 0] <= 1.) & \
+        valids = (norm_coord_imgs[..., 0] >= -1.) & (norm_coord_imgs[..., 0] <= 1.) & \
                 (norm_coord_imgs[..., 1] >= -1.) & (norm_coord_imgs[..., 1] <= 1.) & \
                 (norm_coord_imgs[..., 2] >= -1.) & (norm_coord_imgs[..., 2] <= 1.)
-            outputs['valids'] = valids
-            valids = valids.float()
+        outputs['valids'] = valids
+        valids = valids.float()
+
+        # build 3D Volume
+        grid = norm_coord_imgs.clone().detach()
+        grid[..., 2] = 0        # set z axis to 0, because of the image feature map doesn't have z axis
+        Voxel = F.grid_sample(refimg_fea.unsqueeze(2), grid, align_corners=True)
+        Voxel = Voxel * valids[:, None, :, :, :]
+
+        # 3D Conv
+        cost0 = self.dres0(Voxel)
+        cost0 = self.dres1(cost0) + cost0
+        out1, pre1, post1 = self.dres2(cost0, None, None)
+        out1 = out1 + cost0
+
+        # depth head
+        cost1 = self.classif1(out1)
+        # cost1 = F.upsample(cost1, [self.maxdisp, left.size()[2], left.size()[3]], mode='trilinear', align_corners=self.cfg.align_corners)
+        # cost1 = torch.squeeze(cost1, 1)             # (N, 192, 20, 304)
+        # pred_occupancy = torch.sigmoid(cost1)
+        pred_occupancy = cost1.permute(0, 2, 3, 4, 1)                        #(N ,192, 20, 304, 1)
+        outputs['occupancy_preds'] = pred_occupancy
+
+        # if self.PlaneSweepVolume and self.loss_disp:
+        #     if self.hg_cv:
+        #         cost1 = F.upsample(cost1, [self.maxdisp, left.size()[2], left.size()[3]], mode='trilinear', align_corners=self.cfg.align_corners)
+        #         cost1 = torch.squeeze(cost1, 1)
+        #         pred1_softmax = F.softmax(cost1, dim=1)
+        #         pred1 = self.dispregression(pred1_softmax, depth=self.depth.cuda())
+        #         if self.training:
+        #             outputs['depth_preds'].append( pred1 )
+        #         else:
+        #             outputs['depth_preds'] = pred1
+        #     else:
+        #         cost0 = F.upsample(cost0, [self.maxdisp, left.size()[2], left.size()[3]], mode='trilinear', align_corners=self.cfg.align_corners)
+        #         cost0 = torch.squeeze(cost0, 1)
+        #         pred1_softmax = F.softmax(cost0, dim=1)
+        #         pred1 = self.dispregression(pred1_softmax, depth=self.depth.cuda())
+        #         if self.training:
+        #             outputs['depth_preds'].append( pred1 )
+        #         else:
+        #             outputs['depth_preds'] = pred1
+
+        if self.cfg.RPN3D_ENABLE:
 
             if self.PlaneSweepVolume:
                 # Retrieve Voxel Feature from Cost Volume Feature

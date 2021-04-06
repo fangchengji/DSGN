@@ -47,7 +47,7 @@ def get_kitti_annos(labels,
             continue 
 
         boxes.append( np.array(label.box2d) )
-        box3ds.append( np.array(label.box3d[[3,4,5, 0,1,2, 6]]) )
+        box3ds.append( np.array(label.box3d[[3,4,5, 0,1,2, 6]]) )   # trans from [x, y, z, h, w, l, ry] to [h, w, l, x, y, z, ry]
         ori_classes.append( typ )
 
         boxes[-1][2:4] = boxes[-1][2:4] - boxes[-1][0:2]

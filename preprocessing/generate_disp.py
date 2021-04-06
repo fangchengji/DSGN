@@ -6,6 +6,8 @@ import scipy.misc as ssc
 
 import kitti_util
 import imageio
+import skimage
+import skimage.io
 
 DEPTH_AS_DISP = True
 
@@ -17,7 +19,7 @@ def generate_dispariy_from_velo(pc_velo, height, width, calib, depth_as_disp=Fal
     imgfov_pc_velo = pc_velo[fov_inds, :]
     imgfov_pts_2d = pts_2d[fov_inds, :]
     imgfov_pc_rect = calib.project_velo_to_rect(imgfov_pc_velo)
-    depth_map = np.zeros((height, width)) - 1
+    depth_map = np.zeros((height, width)) - 1           # set -1 for default
     imgfov_pts_2d = np.round(imgfov_pts_2d).astype(int)
     for i in range(imgfov_pts_2d.shape[0]):
         depth = imgfov_pc_rect[i, 2]
@@ -32,6 +34,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_path', type=str, default='~/Kitti/object/training/')
     parser.add_argument('--split_file', type=str, default='~/Kitti/object/train.txt')
     parser.add_argument('--right_calib', action='store_true', default=False)
+    parser.add_argument('--save_figure', action='store_true', default=False)
     args = parser.parse_args()
 
     assert os.path.isdir(args.data_path)
@@ -71,4 +74,6 @@ if __name__ == '__main__':
         print('calib baseline {}'.format(calib.baseline))
         disp = generate_dispariy_from_velo(lidar, height, width, calib, depth_as_disp=DEPTH_AS_DISP, baseline=calib.baseline)
         np.save(disparity_dir + '/' + predix + ('_r' if args.right_calib else ''), disp)
+        if args.save_figure:
+            skimage.io.imsave(disparity_dir +'/'+ predix + '.png',(disp).astype('uint16'))
         print('Finish Disparity {}'.format(predix + ('_r' if args.right_calib else '')))
