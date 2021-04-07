@@ -81,8 +81,9 @@ class myImageFloder(data.Dataset):
         elif 'test.txt' in split:
             self.kitti_dataset = kitti_dataset('trainval').val_dataset
 
+        self.dataset_dir = self.kitti_dataset.split_dir
         self.generate_target = generate_target
-        self.save_path = './outputs/temp/anchor_{}angles'.format(self.cfg.num_angles)
+        self.save_path = self.dataset_dir + '/temp/anchor_{}angles'.format(self.cfg.num_angles)
         self.flip = getattr(self.cfg, 'flip', False)
 
         if 'trainval.txt' in split:
@@ -107,7 +108,7 @@ class myImageFloder(data.Dataset):
             self.save_path += '_mono'
 
         if self.generate_target:
-            os.system('mkdir {}'.format(self.save_path))
+            os.system('mkdir -p {}'.format(self.save_path))
 
     def __getitem__(self, index):
         left = self.left[index]
@@ -124,7 +125,7 @@ class myImageFloder(data.Dataset):
                 self.flip_this_image = False
         else:
             if self.flip and self.training:
-                self.flip_this_image = np.random.randint(2) > 0.5   # 0, 1
+                self.flip_this_image = np.random.randint(2) >= 0.5   # 0, 1
             else:
                 self.flip_this_image = False
 
@@ -151,7 +152,7 @@ class myImageFloder(data.Dataset):
                 left_img = hflip(left_img)
                 dataL = np.ascontiguousarray(dataL[:, ::-1])
 
-                # TODO: Flip the calib
+                # Flip the calib
                 width, _ = left_img.size
                 calib.flip_horizon(width)
 

@@ -24,7 +24,6 @@ from dsgn.models import *
 from env_utils import *
 
 from dsgn.models.loss3d import RPN3DLoss
-from dsgn.models.focal_loss import FocalLoss
 from fvcore.nn import sigmoid_focal_loss_jit
 import skimage.io
 
@@ -33,7 +32,7 @@ import torch.distributed as dist
 import torch.utils.data.distributed
 import torch.multiprocessing as mp
 
-g_loss_normalizer = 1000    # avoid the value is too small
+g_loss_normalizer = 1000    # avoid the value is too small at the begining
 
 def get_parser():
     parser = argparse.ArgumentParser(description='PSMNet')
@@ -45,7 +44,7 @@ def get_parser():
     parser.add_argument('--debug', action='store_true', default=False, help='debug mode')
     parser.add_argument('--seed', type=int, default=1, metavar='S', help='random seed (default: 1)')
     parser.add_argument('--devices', '-d', type=str, default=None)
-    parser.add_argument('--lr_scale', type=int, default=40, metavar='S', help='lr scale')
+    parser.add_argument('--lr_scale', type=int, default=50, metavar='S', help='lr scale')
     parser.add_argument('--split_file', default='./data/kitti/train.txt', help='split file')
     parser.add_argument('--btrain', '-btrain', type=int, default=None)
     parser.add_argument('--start_epoch', type=int, default=1)
@@ -392,7 +391,8 @@ def train(model, cfg, args, optimizer, imgL, imgR, disp_L, calib=None, calib_R=N
         # Negative voxels are depth >= 0 and not match the voxel depth. 
         # Depth equals to 0 means the voxel are padded by grid_sample, which should be negative.
         # Ignore voxels are depth < 0
-        ignore_mask = (depth_volume < 0).squeeze()          # N, 192, 20, 304
+        # Attentation: set the padding area to ignored which can balance the positive points and negative points
+        ignore_mask = (depth_volume <= 0).squeeze()          # N, 192, 20, 304
         valid_mask = ~ignore_mask
         valid_mask = valid_mask | positive_masks
         ignore_mask = ~valid_mask
@@ -422,12 +422,7 @@ def train(model, cfg, args, optimizer, imgL, imgR, disp_L, calib=None, calib_R=N
         #     np.save(save_path, pred_voxels)
            
         # occupancy_loss = F.binary_cross_entropy(occupancy_preds[valid_mask], occupancy_gt[valid_mask])
-        # focal_loss = FocalLoss(use_sigmoid=True,                 
-        #                         gamma=2.0,
-        #                         alpha=0.25,
-        #                         reduction='sum')
-        # occupancy_loss = focal_loss(occupancy_preds[valid_mask], occupancy_gt[valid_mask])
-        
+
         num_pos = positive_masks.sum().item()
         g_loss_normalizer = 0.9 * g_loss_normalizer + (1 - 0.9) * max(num_pos, 1)
 

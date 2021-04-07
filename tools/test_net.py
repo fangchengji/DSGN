@@ -42,6 +42,8 @@ parser.add_argument('--save_path', type=str, default='./outputs/result', metavar
                     help='path to save the predict')
 parser.add_argument('--save_lidar', action='store_true',
                     help='if true, save the numpy file, not the png file')
+parser.add_argument('--save_occupancy', action='store_true',
+                    help='if true, save the numpy file, not the png file')
 parser.add_argument('--save_depth_map', action='store_true',
                     help='if true, save the numpy file, not the png file')
 parser.add_argument('--btest', '-btest', type=int, default=None)
@@ -101,14 +103,17 @@ all_left_img, all_right_img, all_left_disp, = ls.dataloader(args.data_path,
 
 
 class BatchCollator(object):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
 
     def __call__(self, batch):
         transpose_batch = list(zip(*batch))
         l = torch.cat(transpose_batch[0], dim=0)
-        r = torch.cat(transpose_batch[1], dim=0)
+        r = torch.cat(transpose_batch[1], dim=0) if not self.cfg.mono else None
         disp = torch.stack(transpose_batch[2], dim=0)
         calib = transpose_batch[3]
-        calib_R = transpose_batch[4]
+        calib_R = transpose_batch[4] if not self.cfg.mono else None
         image_sizes = transpose_batch[5]
         image_indexes = transpose_batch[6]
         outputs = [l, r, disp, calib, calib_R, image_sizes, image_indexes]
@@ -120,9 +125,12 @@ ImageFloader = DA.myImageFloder(
 TestImgLoader = torch.utils.data.DataLoader(
     ImageFloader,
     batch_size=args.btest, shuffle=False, num_workers=num_workers, drop_last=False,
-    collate_fn=BatchCollator())
+    collate_fn=BatchCollator(cfg))
 
-model = StereoNet(cfg=cfg)
+if cfg.mono:
+    model = MonoNet(cfg)
+else:
+    model = StereoNet(cfg=cfg)
 
 model = nn.DataParallel(model)
 model.cuda()
@@ -143,9 +151,10 @@ def test(imgL, imgR, image_sizes=None, calibs_fu=None, calibs_baseline=None, cal
     with torch.no_grad():
         outputs = model(imgL, imgR, calibs_fu, calibs_baseline,
                         calibs_Proj, calibs_Proj_R=calibs_Proj_R)
-    pred_disp = outputs['depth_preds']
+    pred_occupancy = outputs['occupancy_preds']
+    coord_rect = outputs['coord_rect']
 
-    rets = [pred_disp]
+    rets = [pred_occupancy, coord_rect]
 
     if cfg.RPN3D_ENABLE:
         box_pred = make_fcos3d_postprocessor(cfg)(
@@ -289,16 +298,15 @@ def main():
         __file__)), '..', os.path.dirname(args.loadmodel))
     if not os.path.exists(output_path + '/kitti_output' + args.tag):
         os.makedirs(output_path + '/kitti_output' + args.tag)
-    else:
-        os.system('rm -rf {}/*'.format(output_path + '/kitti_output' + args.tag))
+    # else:
+    #     os.system('rm -rf {}/*'.format(output_path + '/kitti_output' + args.tag))
 
     all_err = 0.
     all_err_med = 0.
 
     stat = []
 
-    for batch_idx, databatch \
-            in enumerate(TestImgLoader):
+    for batch_idx, databatch in enumerate(TestImgLoader):
 
         imgL, imgR, gt_disp, calib_batch, calib_R_batch, image_sizes, image_indexes = databatch
 
@@ -306,23 +314,23 @@ def main():
             if batch_idx * len(imgL) > args.debugnum:
                 break
 
-        imgL, imgR, gt_disp = imgL.cuda(), imgR.cuda(), gt_disp.cuda()
+        imgL, gt_disp = imgL.cuda(), gt_disp.cuda()
 
         calibs_fu = torch.as_tensor([c.f_u for c in calib_batch])
-        calibs_baseline = torch.as_tensor(
-            [(c.P[0, 3] - c_R.P[0, 3]) / c.P[0, 0] for c, c_R in zip(calib_batch, calib_R_batch)])
+        # calibs_baseline = torch.as_tensor(
+        #     [(c.P[0, 3] - c_R.P[0, 3]) / c.P[0, 0] for c, c_R in zip(calib_batch, calib_R_batch)])
         calibs_Proj = torch.as_tensor([c.P for c in calib_batch])
-        calibs_Proj_R = torch.as_tensor([c.P for c in calib_R_batch])
+        # calibs_Proj_R = torch.as_tensor([c.P for c in calib_R_batch])
 
         start_time = time.time()
         cfg.time = time.time()
-        output = test(imgL, imgR, image_sizes=image_sizes, calibs_fu=calibs_fu,
-                      calibs_baseline=calibs_baseline, calibs_Proj=calibs_Proj, calibs_Proj_R=calibs_Proj_R)
+        output = test(imgL, None, image_sizes=image_sizes, calibs_fu=calibs_fu,
+                      calibs_baseline=None, calibs_Proj=calibs_Proj, calibs_Proj_R=None)
+        pred_disp, coord_rect = output[0], output[1]
+        
         if cfg.RPN3D_ENABLE:
-            pred_disp, box_pred = output
+            box_pred = output[-1]
             kitti_output(box_pred[0], image_indexes, output_path + '/kitti_output' + args.tag)
-        else:
-            pred_disp, = output
         print('time = %.2f' % (time.time() - start_time))
 
         if getattr(cfg, 'PlaneSweepVolume', True) and getattr(cfg, 'loss_disp', True):
@@ -341,7 +349,10 @@ def main():
 
         if args.save_depth_map:
             for i in range(len(image_indexes)):
-                depth_map = project_disp_to_depth_map(calib_batch[i], pred_disp[i].cpu().numpy()[:image_sizes[i][0], :image_sizes[i][1]], max_high=1., baseline=(calib_batch[i].P[0, 3] - calib_R_batch[i].P[0, 3]) / calib_batch[i].P[0, 0],
+                depth_map = project_disp_to_depth_map(calib_batch[i], 
+                                                      pred_disp[i].cpu().numpy()[:image_sizes[i][0], :image_sizes[i][1]], 
+                                                      max_high=1., 
+                                                      baseline=(calib_batch[i].P[0, 3] - calib_R_batch[i].P[0, 3]) / calib_batch[i].P[0, 0],
                                                       depth_disp=True)
                 if not os.path.exists('{}/depth_maps/'.format(args.save_path)):
                     os.makedirs('{}/depth_maps/'.format(args.save_path))
@@ -350,13 +361,26 @@ def main():
 
         if args.save_lidar:
             for i in range(len(image_indexes)):
-                lidar = project_disp_to_depth(calib_batch[i], pred_disp[i].cpu().numpy()[:image_sizes[i][0], :image_sizes[i][1]], max_high=1., baseline=(calib_batch[i].P[0, 3] - calib_R_batch[i].P[0, 3]) / calib_batch[i].P[0, 0],
+                lidar = project_disp_to_depth(calib_batch[i], 
+                                              pred_disp[i].cpu().numpy()[:image_sizes[i][0], :image_sizes[i][1]], 
+                                              max_high=1., 
+                                              baseline=(calib_batch[i].P[0, 3] - calib_R_batch[i].P[0, 3]) / calib_batch[i].P[0, 0],
                                               depth_disp=True)
                 lidar = np.concatenate(
                     [lidar, np.ones((lidar.shape[0], 1))], 1)
                 lidar = lidar.astype(np.float32)
                 lidar.tofile(
                     '{}/{:06d}.bin'.format(args.save_path, image_indexes[i]))
+
+        # save occupancy as point cloud
+        if args.save_occupancy:
+            # save pred as 3d points
+            for i, img_idx in enumerate(image_indexes):
+                pred_occupancy_i =torch.sigmoid(pred_disp[i])
+                pred_mask = pred_occupancy_i > 0.5
+                pred_voxels = coord_rect[pred_mask.squeeze()].cpu().numpy()
+                save_path = f"{args.save_path}/{img_idx:06d}_pred.npy"
+                np.save(save_path, pred_voxels)
 
     stat = np.asarray(stat)
 

@@ -9,9 +9,10 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class kitti_dataset(object):
     def __init__(self, split='train', data_path=osp.join(CURRENT_DIR, '..', '..', 'data', 'kitti'), 
-            type_whitelist=['Car'],
-            min_reflectance=-0.1,
-            res_path = None):
+                type_whitelist=['Car'],
+                min_reflectance=-0.1,
+                res_path = None):
+        super().__init__()
 
         self.data_path = data_path
         self.split = split

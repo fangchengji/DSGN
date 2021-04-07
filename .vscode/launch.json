@@ -29,11 +29,41 @@
             "console": "integratedTerminal",
             "args": [
                 "--cfg", "configs/config_car_mono.py",
-                "--savemodel", "./outputs/dsgn_car_mono",
+                "--savemodel", "./outputs/dsgn_car_mono_debug",
                 "-btrain",  "2",
-                "-d", "7",
-                "--loadmodel", "./outputs/dsgn_car_mono/finetune_53.tar"
+                "-d", "0",
+                // "--loadmodel", "./outputs/dsgn_car_mono/finetune_53.tar"
             ]
-        }
+        },
+        {
+            "name": "Python: mp_trian",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceRoot}/tools/train_net.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--cfg", "configs/config_car_mono.py",
+                "--savemodel", "./outputs/dsgn_car_mono_debug",
+                "-btrain",  "4",
+                "-d", "5-6",
+                "--multiprocessing-distributed"
+                // "--loadmodel", "./outputs/dsgn_car_mono/finetune_53.tar"
+            ]
+        },
+        {
+            "name": "Python: test",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceRoot}/tools/test_net.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--cfg", "configs/config_car_mono.py",
+                "--loadmodel", "./outputs/dsgn_car_mono_rpn64/finetune_10.tar",
+                "-btest",  "4",
+                "-d", "0",
+                "--save_occupancy",
+                // "--loadmodel", "./outputs/dsgn_car_mono/finetune_53.tar"
+            ]
+        },
     ]
 }

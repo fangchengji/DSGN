@@ -37,13 +37,13 @@ cfg.max_depth = (cfg.maxdisp + cfg.depth_min_intervals) * cfg.depth_interval    
 cfg.min_depth = cfg.depth_min_intervals * cfg.depth_interval            # 2m
 
 cfg.loss_disp = True
-cfg.flip = False
+cfg.flip = True
 
 #------------- detection ---------------#
-cfg.RPN_CONVDIM = 32
+cfg.RPN_CONVDIM = 64
 cfg.RPN_ONEMORE_CONV = True
 cfg.RPN_ONEMORE_DIM = 64
-cfg.RPN3D_ENABLE = False    
+cfg.RPN3D_ENABLE = True
 
 cfg.RPN3D = CN()
 cfg.RPN3D.ANCHORS_Y = [0.74, 0.825, 0.74]
@@ -106,7 +106,7 @@ print('CV GRID SIZE', cfg.CV_GRID_SIZE)
 cfg.ANCHOR_ANGLES = [0., np.pi / 2., np.pi, np.pi / 2. * 3.]
 cfg.num_angles = len(cfg.ANCHOR_ANGLES)
 # cat disparity
-cfg.cat_disp = True
+cfg.cat_disp = False
 
 # cat img feature
 cfg.cat_img_feature = True

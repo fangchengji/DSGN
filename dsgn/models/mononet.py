@@ -1,5 +1,7 @@
 from __future__ import print_function
 
+from torch._C import device
+
 from .submodule import *
 import torch
 import torch.nn as nn
@@ -73,11 +75,10 @@ class MonoNet(nn.Module):
         self.num_3dconvs = getattr(self.cfg.RPN3D, 'NUM_3DCONVS', 1)
         assert self.num_3dconvs > 0
 
-        RPN3D_INPUT_DIM = 0
-        if self.PlaneSweepVolume: RPN3D_INPUT_DIM += res_dim
-        if self.cat_disp: RPN3D_INPUT_DIM += 1
+        RPN3D_INPUT_DIM = res_dim
+        # if self.cat_disp: RPN3D_INPUT_DIM += 1
         if self.cat_img_feature: RPN3D_INPUT_DIM += self.cfg.RPN_CONVDIM
-        if self.cat_right_img_feature: RPN3D_INPUT_DIM += self.cfg.RPN_CONVDIM
+        # if self.cat_right_img_feature: RPN3D_INPUT_DIM += self.cfg.RPN_CONVDIM
 
         if self.cfg.RPN3D_ENABLE:
             conv3d_dim = getattr(self.cfg, 'conv3d_dim', 64)
@@ -268,10 +269,12 @@ class MonoNet(nn.Module):
                 ).reshape(*self.coord_rect.shape[:3], 2), 
             dtype=torch.float32)
 
-            coord_img = torch.cat([coord_img, self.coord_rect[..., 2:]], dim=-1)    # cat zs to image coord point
+            coord_img = torch.cat([coord_img, coord_rect[..., 2:]], dim=-1)    # cat zs to image coord point
             # Note: there is an align corner implement when calculating the axises width!
-            norm_coord_img = (coord_img - torch.as_tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN])[None, None, None, :]) / \
-                (torch.as_tensor([self.CV_X_MAX, self.CV_Y_MAX, self.CV_Z_MAX]) - torch.as_tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN]))[None, None, None, :]
+            device = coord_img.device
+            norm_coord_img = (coord_img - torch.tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN], device=device)[None, None, None, :]) / \
+                (torch.tensor([self.CV_X_MAX, self.CV_Y_MAX, self.CV_Z_MAX], device=device) - 
+                    torch.tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN], device=device))[None, None, None, :]
             norm_coord_img = norm_coord_img * 2. - 1.   # shift to [-1, 1]
             norm_coord_imgs.append(norm_coord_img)
         norm_coord_imgs = torch.stack(norm_coord_imgs, dim=0)
@@ -301,11 +304,11 @@ class MonoNet(nn.Module):
         out1 = out1 + cost0
 
         # depth head
-        cost1 = self.classif1(out1)
+        pred_occupancy = self.classif1(out1)
         # cost1 = F.upsample(cost1, [self.maxdisp, left.size()[2], left.size()[3]], mode='trilinear', align_corners=self.cfg.align_corners)
         # cost1 = torch.squeeze(cost1, 1)             # (N, 192, 20, 304)
         # pred_occupancy = torch.sigmoid(cost1)
-        pred_occupancy = cost1.permute(0, 2, 3, 4, 1)                        #(N ,192, 20, 304, 1)
+        pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)                        #(N ,192, 20, 304, c)
         outputs['occupancy_preds'] = pred_occupancy
 
         # if self.PlaneSweepVolume and self.loss_disp:
@@ -329,96 +332,53 @@ class MonoNet(nn.Module):
         #             outputs['depth_preds'] = pred1
 
         if self.cfg.RPN3D_ENABLE:
+            # Retrieve Voxel Feature from Cost Volume Feature
+            # if self.cat_disp:
+            #     CV_feature = torch.cat([out1, cost.detach()], dim= 1)
+            # else:
+            #     CV_feature =out1                
 
-            if self.PlaneSweepVolume:
-                # Retrieve Voxel Feature from Cost Volume Feature
-                if self.cat_disp:
-                    CV_feature = torch.cat([out, cost.detach()], dim= 1)
-                else:
-                    CV_feature = out
+            rpn_img_feature =  F.grid_sample(left_rpn_feature.unsqueeze(2), grid, align_corners=True)   
+            att_pred_occupancy = pred_occupancy.detach().permute(0, 4, 1, 2, 3)                 # (N, c, d, h, w)
+            att_pred_occupancy = torch.sigmoid(att_pred_occupancy) * valids[:, None, :, :, :]
+            rpn_img_feature = rpn_img_feature * att_pred_occupancy
 
-                Voxel = F.grid_sample(CV_feature, norm_coord_imgs, align_corners=True)
-                Voxel = Voxel * valids[:, None, :, :, :]
+            rpn_voxel_feature = torch.cat([out1, rpn_img_feature], dim=1) 
+            rpn_voxel_feature = rpn_voxel_feature * valids[:, None, :, :, :]
 
-                if (self.voxel_attentionbydisp or (self.img_feature_attentionbydisp and self.cat_img_feature)):
-                    pred_disp = F.grid_sample(pred1_softmax.detach()[:, None], norm_coord_imgs, align_corners=True)
-                    pred_disp = pred_disp * valids[:, None, :, :, :]
-
-                if self.voxel_attentionbydisp:
-                    Voxel = Voxel * pred_disp
-            else:
-                Voxel = None
+            # if self.voxel_attentionbydisp:
+            #     att_pred_occupancy = pred_occupancy.permute(0, 4, 1, 2, 3).detach() * valids[:, None, :, :, :]
+            #     att_pred_occupancy = torch.sigmoid(att_pred_occupancy)
+            #     rpn_voxel_feature = rpn_voxel_feature * att_pred_occupancy
 
             # Retrieve Voxel Feature from 2D Img Feature
-            if self.cat_img_feature:
-                RPN_feature = left_rpn_feature
+            # if self.cat_img_feature:
+                # RPN_faeture = left_rpn_feature
 
-                valids = (norm_coord_imgs[..., 0] >= -1.) & (norm_coord_imgs[..., 0] <= 1.) & \
-                    (norm_coord_imgs[..., 1] >= -1.) & (norm_coord_imgs[..., 1] <= 1.)
-                valids = valids.float() 
+                # valids = (norm_coord_imgs[..., 0] >= -1.) & (norm_coord_imgs[..., 0] <= 1.) & \
+                #     (norm_coord_imgs[..., 1] >= -1.) & (norm_coord_imgs[..., 1] <= 1.)
+                # valids = valids.float() 
 
-                Voxel_2D = []
-                for i in range(N):
-                    RPN_feature_per_im = RPN_feature[i:i+1]
-                    for j in range(len(norm_coord_imgs[i])):
-                        Voxel_2D_feature = F.grid_sample(RPN_feature_per_im, norm_coord_imgs[i, j:j+1, :, :, :2], align_corners=True)
-                        Voxel_2D.append(Voxel_2D_feature)
-                Voxel_2D = torch.cat(Voxel_2D, dim=0)
-                Voxel_2D = Voxel_2D.reshape(N, self.GRID_SIZE[0], -1, self.GRID_SIZE[1], self.GRID_SIZE[2]).transpose(1,2)
-                Voxel_2D = Voxel_2D * valids[:, None, :, :, :]
+                # Voxel_2D = []
+                # for i in range(N):
+                #     RPN_feature_per_im = RPN_feature[i:i+1]
+                #     for j in range(len(norm_coord_imgs[i])):
+                #         Voxel_2D_feature = F.grid_sample(RPN_feature_per_im, norm_coord_imgs[i, j:j+1, :, :, :2], align_corners=True)
+                #         Voxel_2D.append(Voxel_2D_feature)
+                # Voxel_2D = torch.cat(Voxel_2D, dim=0)
+                # Voxel_2D = Voxel_2D.reshape(N, self.GRID_SIZE[0], -1, self.GRID_SIZE[1], self.GRID_SIZE[2]).transpose(1,2)
+                # Voxel_2D = Voxel_2D * valids[:, None, :, :, :]
 
-                if self.img_feature_attentionbydisp:
-                    Voxel_2D = Voxel_2D * pred_disp
+                # if self.img_feature_attentionbydisp:
+                #     Voxel_2D = Voxel_2D * pred_disp
 
-                if Voxel is not None:
-                    Voxel = torch.cat([Voxel, Voxel_2D], dim=1)
-                else:
-                    Voxel = Voxel_2D
-
-            if self.cat_right_img_feature:
-                RPN_feature = right_rpn_feature
-
-                norm_coord_right_imgs = []
-                for i in range(N):
-                    coord_right_img = torch.as_tensor(
-                        project_rect_to_image(
-                            coord_rect.reshape(-1, 3), 
-                            calibs_Proj_R[i].float().cuda()
-                        ).reshape(*self.coord_rect.shape[:3], 2), 
-                    dtype=torch.float32)
-
-                    coord_right_img = torch.cat([coord_right_img, self.coord_rect[..., 2:]], dim=-1)
-                    norm_coord_img = (coord_right_img - torch.as_tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN])[None, None, None, :]) / \
-                        (torch.as_tensor([self.CV_X_MAX, self.CV_Y_MAX, self.CV_Z_MAX]) - torch.as_tensor([self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN]))[None, None, None, :]
-                    norm_coord_img = norm_coord_img * 2. - 1.
-                    norm_coord_right_imgs.append(norm_coord_img)
-                norm_coord_right_imgs = torch.stack(norm_coord_right_imgs, dim=0)
-                norm_coord_right_imgs = norm_coord_right_imgs.cuda()
-
-                valids_R = (norm_coord_right_imgs[..., 0] >= -1.) & (norm_coord_right_imgs[..., 0] <= 1.) & \
-                    (norm_coord_right_imgs[..., 1] >= -1.) & (norm_coord_right_imgs[..., 1] <= 1.) 
-                valids_R = valids_R.float()
-
-                Voxel_2D_R = []
-                for i in range(N):
-                    RPN_feature_per_im = RPN_feature[i:i+1]
-                    for j in range(len(norm_coord_right_imgs[i])):
-                        Voxel_2D_feature = F.grid_sample(RPN_feature_per_im, norm_coord_right_imgs[i, j:j+1, :, :, :2], align_corners=True)
-                        Voxel_2D_R.append(Voxel_2D_feature)
-                Voxel_2D_R = torch.cat(Voxel_2D_R, dim=0)
-                Voxel_2D_R = Voxel_2D_R.reshape(N, self.GRID_SIZE[0], -1, self.GRID_SIZE[1], self.GRID_SIZE[2]).transpose(1,2)
-                Voxel_2D_R = Voxel_2D_R * valids_R[:, None, :, :, :]
-
-                if self.img_feature_attentionbydisp:
-                    Voxel_2D_R = Voxel_2D_R * pred_disp
-
-                if Voxel is not None:
-                    Voxel = torch.cat([Voxel, Voxel_2D_R], dim=1)
-                else:
-                    Voxel = Voxel_2D_R
+                # if Voxel is not None:
+                #     Voxel = torch.cat([Voxel, Voxel_2D], dim=1)
+                # else:
+                #     Voxel = Voxel_2D
 
             # (64, 190, 20, 300)
-            Voxel = self.rpn3d_conv(Voxel) # (64, 190, 20, 300)
+            Voxel = self.rpn3d_conv(rpn_voxel_feature) # (64, 190, 20, 300)
 
             if self.num_3dconvs > 1:
                 Voxel = self.rpn_3dconv1(Voxel)
