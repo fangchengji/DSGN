@@ -229,12 +229,10 @@ class PLUMENet(nn.Module):
 
         norm_coord_imgs = []
         for i in range(N):
-            coord_img = torch.as_tensor(
-                project_rect_to_image(
+            coord_img = project_rect_to_image(
                     coord_rect.reshape(-1, 3), 
                     calibs_Proj[i].float().cuda()
-                ).reshape(*self.coord_rect.shape[:3], 2), 
-            dtype=torch.float32)
+                ).reshape(*self.coord_rect.shape[:3], 2) 
 
             coord_img = torch.cat([coord_img, coord_rect[..., 2:]], dim=-1)    # cat zs to image coord point
             # Note: there is an align corner implement when calculating the axises width!

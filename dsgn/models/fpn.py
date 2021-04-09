@@ -120,10 +120,10 @@ class FPN(nn.Module):
 
         for i in range(self.start_level, self.backbone_end_level):
             l_conv = nn.Sequential(nn.Conv2d(in_channels[i], out_channels, kernel_size=1, stride=1, padding=0, bias=False),
-                                   nn.GroupNorm(32, out_channels) if norm_cfg is "GN" else nn.BatchNorm2d(out_channels))
+                                   nn.GroupNorm(32, out_channels) if norm_cfg=="GN" else nn.BatchNorm2d(out_channels))
 
             fpn_conv = nn.Sequential(nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
-                                     nn.GroupNorm(32, out_channels) if norm_cfg is "GN" else nn.BatchNorm2d(out_channels))
+                                     nn.GroupNorm(32, out_channels) if norm_cfg=="GN" else nn.BatchNorm2d(out_channels))
 
             self.lateral_convs.append(l_conv)
             self.fpn_convs.append(fpn_conv)
@@ -137,7 +137,7 @@ class FPN(nn.Module):
                 else:
                     in_channels = out_channels
                 extra_fpn_conv = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, bias=False),
-                                               nn.GroupNorm(32, out_channels) if norm_cfg is "GN" else nn.BatchNorm2d(out_channels))
+                                               nn.GroupNorm(32, out_channels) if norm_cfg=="GN" else nn.BatchNorm2d(out_channels))
 
                 self.fpn_convs.append(extra_fpn_conv)
 

@@ -17,7 +17,9 @@ import skimage.transform
 import numpy as np
 import time
 import math
-from dsgn.models import *
+# from dsgn.models import *
+from dsgn.build_model import build_model
+
 from dsgn.utils.numpy_utils import *
 from dsgn.utils.numba_utils import *
 from dsgn.utils.torch_utils import *
@@ -127,23 +129,20 @@ TestImgLoader = torch.utils.data.DataLoader(
     batch_size=args.btest, shuffle=False, num_workers=num_workers, drop_last=False,
     collate_fn=BatchCollator(cfg))
 
-if cfg.mono:
-    model = MonoNet(cfg)
-else:
-    model = StereoNet(cfg=cfg)
-
-model = nn.DataParallel(model)
-model.cuda()
+model = build_model(cfg)
 
 if args.loadmodel is not None and args.loadmodel.endswith('tar'):
     state_dict = torch.load(args.loadmodel)
-    model.load_state_dict(state_dict['state_dict'], strict=False)
+    model.load_state_dict(state_dict['state_dict'], strict=True)
     print('Loaded {}'.format(args.loadmodel))
 else:
     print('------------------------------ Load Nothing ---------------------------------')
 
 print('Number of model parameters: {}'.format(
     sum([p.data.nelement() for p in model.parameters()])))
+
+model = nn.DataParallel(model)
+model.cuda()
 
 
 def test(imgL, imgR, image_sizes=None, calibs_fu=None, calibs_baseline=None, calibs_Proj=None, calibs_Proj_R=None):

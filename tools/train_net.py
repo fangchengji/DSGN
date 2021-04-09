@@ -13,13 +13,13 @@ import torch.nn.parallel
 import torch.optim as optim
 from torch.serialization import save
 import torch.utils.data
-from torch.autograd import Variable
 
 torch.backends.cudnn.benchmark = True
 
 from dsgn.dataloader import KITTILoader3D as ls
 from dsgn.dataloader import KITTILoader_dataset3d as DA
-from dsgn.models import *
+# from dsgn.models import *
+from dsgn.build_model import build_model
 
 from env_utils import *
 
@@ -139,10 +139,8 @@ def main_worker(gpu, ngpus_per_node, args, cfg, exp):
                                 world_size=args.world_size, rank=args.rank)
 
     #------------------- Model -----------------------
-    if cfg.mono:
-        model = MonoNet(cfg)
-    else:
-        model = StereoNet(cfg)
+    model = build_model(cfg)
+
     optimizer = optim.Adam(model.parameters(), lr=0.1, betas=(0.9, 0.999))
 
     if args.distributed:
@@ -421,18 +419,25 @@ def train(model, cfg, args, optimizer, imgL, imgR, disp_L, calib=None, calib_R=N
         #     save_path = f"./outputs/debug/{img_idx:06d}_pred.npy"
         #     np.save(save_path, pred_voxels)
            
-        # occupancy_loss = F.binary_cross_entropy(occupancy_preds[valid_mask], occupancy_gt[valid_mask])
-
         num_pos = positive_masks.sum().item()
-        g_loss_normalizer = 0.9 * g_loss_normalizer + (1 - 0.9) * max(num_pos, 1)
+        g_loss_normalizer = 0.9 * g_loss_normalizer + (1 - 0.9) * max(num_pos, 1)            
 
-        occupancy_loss = sigmoid_focal_loss_jit(
-            occupancy_preds[valid_mask], 
-            occupancy_gt[valid_mask],
-            alpha=0.25,
-            gamma=2.0,
-            reduction="sum",
-        ) / g_loss_normalizer
+        if getattr(cfg, "occupancy_loss", "BCELoss") == "BCELoss":
+            # bce loss
+            occupancy_loss = F.binary_cross_entropy_with_logits(
+                occupancy_preds[valid_mask], 
+                occupancy_gt[valid_mask],
+                reduction="sum",
+            ) / g_loss_normalizer
+        else:
+            # focal loss
+            occupancy_loss = sigmoid_focal_loss_jit(
+                occupancy_preds[valid_mask], 
+                occupancy_gt[valid_mask],
+                alpha=0.25,
+                gamma=2.0,
+                reduction="sum",
+            ) / g_loss_normalizer
 
         loss_dict.update(occupancy_loss = occupancy_loss)
 
