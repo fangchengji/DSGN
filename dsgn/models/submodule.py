@@ -7,6 +7,8 @@ import torch.nn.functional as F
 import math
 import numpy as np
 from torch.nn import BatchNorm2d
+from .fpn import FPN
+
 
 def convbn(in_planes, out_planes, kernel_size, stride, pad, dilation, gn=False, groups=32):
     return nn.Sequential(nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=dilation if dilation > 1 else pad, dilation = dilation, bias=False),
@@ -295,3 +297,167 @@ class feature_extraction(nn.Module):
             output_feature = None
 
         return output_feature, rpn_feature
+
+
+class plume_feature_extraction(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+
+        self.cfg = cfg
+        self.rpn_onemore_dim = getattr(self.cfg, 'RPN_ONEMORE_DIM', 256)
+        self.img_feature_relu = getattr(self.cfg, 'img_feature_relu', True)
+        self.mono = getattr(self.cfg, 'mono', False)
+        self.out_channels = 32
+
+        self.backbone = getattr(self.cfg, 'backbone', 'reslike-det-small')
+        if self.backbone == 'reslike-det':
+            first_dim = 64
+            dims = [64, 128, 192, 256]
+            nr_convs = [3, 6, 12, 4]
+            branch_dim = 32
+            lastconv_dim = [256, 32]
+        elif self.backbone == 'reslike-det-small':
+            first_dim = 32
+            dims = [32, 64, 128, 128]
+            nr_convs = [6, 12, 3, 3]
+            branch_dim = 32
+            lastconv_dim = [128, 64]
+        else:
+            raise ValueError('Invalid backbone {}.'.format(self.backbone))
+
+        self.inplanes = first_dim
+
+        self.firstconv = nn.Sequential(convbn(3, first_dim, 3, 1, 1, 1, gn=cfg.GN if first_dim >= 32 else False),
+                                       nn.ReLU(inplace=True),
+                                       convbn(first_dim, first_dim, 3, 1, 1, 1, gn=cfg.GN if first_dim >= 32 else False),
+                                       nn.ReLU(inplace=True),
+                                       convbn(first_dim, first_dim, 3, 1, 1, 1, gn=cfg.GN if first_dim >= 32 else False),
+                                       nn.ReLU(inplace=True))
+
+        self.layer0 = self._make_layer(BasicBlock, first_dim, 3, 1, 1, 1, gn=cfg.GN)       # 1x
+
+        self.layer1 = self._make_layer(BasicBlock, dims[0], nr_convs[0], 2,1,1, gn=cfg.GN if dims[0] >= 32 else False)  # 2x
+        self.layer2 = self._make_layer(BasicBlock, dims[1], nr_convs[1], 2,1,1, gn=cfg.GN)  # 4x
+        self.layer3 = self._make_layer(BasicBlock, dims[2], nr_convs[2], 1,1,1, gn=cfg.GN)
+        self.layer4 = self._make_layer(BasicBlock, dims[3], nr_convs[3], 1,1,2, gn=cfg.GN)
+
+        # SPPN
+        self.branch1 = nn.Sequential(nn.AvgPool2d((64, 64), stride=(64,64)),
+                                     convbn(dims[3], branch_dim, 1, 1, 0, 1, gn=cfg.GN, groups=min(32, branch_dim)),
+                                     nn.ReLU(inplace=True))
+
+        self.branch2 = nn.Sequential(nn.AvgPool2d((32, 32), stride=(32,32)),
+                                     convbn(dims[3], branch_dim, 1, 1, 0, 1, gn=cfg.GN, groups=min(32, branch_dim)),
+                                     nn.ReLU(inplace=True))
+
+        self.branch3 = nn.Sequential(nn.AvgPool2d((16, 16), stride=(16,16)),
+                                     convbn(dims[3], branch_dim, 1, 1, 0, 1, gn=cfg.GN, groups=min(32, branch_dim)),
+                                     nn.ReLU(inplace=True))
+
+        self.branch4 = nn.Sequential(nn.AvgPool2d((8, 8), stride=(8,8)),
+                                     convbn(dims[3], branch_dim, 1, 1, 0, 1, gn=cfg.GN, groups=min(32, branch_dim)),
+                                     nn.ReLU(inplace=True))
+
+        concat_dim = branch_dim * 4 + dims[1] + dims[3] + dims[2]
+
+        self.lastconv = nn.Sequential(convbn(concat_dim, lastconv_dim[0], 3, 1, 1, 1, gn=cfg.GN),
+                                      nn.ReLU(inplace=True),
+                                      nn.Conv2d(lastconv_dim[0], lastconv_dim[1], kernel_size=1, padding=0, stride = 1, bias=False))
+
+        # FPN for feature fusion
+        fpn_in_channels = [first_dim, dims[0], lastconv_dim[1]]
+        num_outs = 3
+        self.fpn = FPN(fpn_in_channels,
+                       self.out_channels,
+                       num_outs,
+                       start_level=0,
+                       end_level=-1,
+                       add_extra_convs=False,
+                       extra_convs_on_inputs=True,
+                       relu_before_extra_convs=False,
+                       conv_cfg=None,
+                       norm_cfg=None,
+                       act_cfg=None,
+                       upsample_cfg=dict(mode='nearest')
+                       )
+
+        # if self.cfg.RPN3D_ENABLE and self.cat_img_feature:
+        #     if self.rpn_onemore_conv:
+        #         rpnconvs = [convbn(concat_dim, self.rpn_onemore_dim, 3, 1, 1, 1, gn=cfg.GN),
+        #                            nn.ReLU(inplace=True),
+        #                            convbn(self.rpn_onemore_dim, self.cfg.RPN_CONVDIM, 3, 1, 1, 1, gn=cfg.GN, groups=(32 if self.cfg.RPN_CONVDIM % 32 == 0 else 16))]
+        #     else:
+        #         rpnconvs = [convbn(concat_dim, self.cfg.RPN_CONVDIM, 3, 1, 1, 1, gn=cfg.GN, groups=(32 if self.cfg.RPN_CONVDIM % 32 == 0 else 16))]
+        #     if self.img_feature_relu:
+        #         rpnconvs.append( nn.ReLU(inplace=True) )
+        #     self.rpnconv = nn.Sequential( *rpnconvs )
+
+    def _make_layer(self, block, planes, blocks, stride, pad, dilation, gn=False):
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+           downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion) if not gn else nn.GroupNorm(32, planes * block.expansion))
+
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample, pad, dilation, gn=gn))
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes,1,None,pad,dilation, gn=gn))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        outs = []
+        output      = self.firstconv(x)         ; #print('conv1', output.shape)           # (1, 32, 192, 624)
+        output      = self.layer0(output)
+        outs.append(output)
+
+        output      = self.layer1(output)       ; #print('conv2', output.shape)           # (1, 32, 192, 624)
+        outs.append(output)
+
+        output_raw  = self.layer2(output)       ; #print('conv3', output_raw.shape)       # (1, 64, 96, 312)
+        output_mid  = self.layer3(output_raw)   ; #print('conv4', output.shape)           # (1, 128, 96, 312)
+        output_skip = self.layer4(output_mid)   ; #print('conv5', output_skip.shape)      # (1, 128, 96, 312)
+
+        output_branch1 = self.branch1(output_skip) ; #print('b1', output_branch1.shape) # (1, 32, 1, 4) # avgpool 64
+        output_branch1 = F.interpolate(output_branch1, 
+                                       (output_skip.size()[2],output_skip.size()[3]),
+                                       mode='bilinear', 
+                                       align_corners=self.cfg.align_corners) # (1, 32, 96, 312)
+
+        output_branch2 = self.branch2(output_skip) ; #print('b2', output_branch2.shape)# (1, 32, 3, 9)
+        output_branch2 = F.interpolate(output_branch2, 
+                                       (output_skip.size()[2],output_skip.size()[3]),
+                                       mode='bilinear', 
+                                       align_corners=self.cfg.align_corners)
+
+        output_branch3 = self.branch3(output_skip) ; #print('b3', output_branch3.shape)# (1, 32, 6, 19)
+        output_branch3 = F.interpolate(output_branch3, 
+                                       (output_skip.size()[2],output_skip.size()[3]),
+                                       mode='bilinear', 
+                                       align_corners=self.cfg.align_corners)
+
+        output_branch4 = self.branch4(output_skip) ; #print('b4', output_branch4.shape)# (1, 32, 12, 39)
+        output_branch4 = F.interpolate(output_branch4, 
+                                       (output_skip.size()[2],output_skip.size()[3]),
+                                       mode='bilinear', 
+                                       align_corners=self.cfg.align_corners)
+
+        concat_feature = torch.cat((output_raw, output_mid, output_skip, output_branch4, output_branch3, output_branch2, output_branch1), 1) ; #print('cat', concat_feature.shape)
+        last_feature = self.lastconv(concat_feature) ; #print('last', output_feature.shape)
+        outs.append(last_feature)
+
+        fpn_outs = self.fpn(outs)
+        
+        # upsample
+        out_feature = 0
+        for i in range(len(fpn_outs)):
+            feature_i = fpn_outs[i]
+            for j in range(i):
+                # align corner ?
+                feature_i = F.interpolate(feature_i, scale_factor=2, mode='bilinear', align_corners=True)
+            out_feature += feature_i
+
+        return out_feature
