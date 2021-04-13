@@ -25,7 +25,7 @@ def project_rect_to_image(pts_3d_rect, P):
     pts_2d[:,1] /= pts_2d[:,2]
     return pts_2d[:,0:2]
 
-class MonoNet(nn.Module):
+class DepthNet(nn.Module):
     def __init__(self, cfg=None):
         super().__init__()
         self.maxdisp = cfg.maxdisp
@@ -75,10 +75,12 @@ class MonoNet(nn.Module):
         self.num_3dconvs = getattr(self.cfg.RPN3D, 'NUM_3DCONVS', 1)
         assert self.num_3dconvs > 0
 
-        RPN3D_INPUT_DIM = res_dim
+        # RPN3D_INPUT_DIM = res_dim
         # if self.cat_disp: RPN3D_INPUT_DIM += 1
-        if self.cat_img_feature: RPN3D_INPUT_DIM += self.cfg.RPN_CONVDIM
+        # if self.cat_img_feature: RPN3D_INPUT_DIM += self.cfg.RPN_CONVDIM
         # if self.cat_right_img_feature: RPN3D_INPUT_DIM += self.cfg.RPN_CONVDIM
+
+        RPN3D_INPUT_DIM = self.cfg.RPN_CONVDIM
 
         if self.cfg.RPN3D_ENABLE:
             conv3d_dim = getattr(self.cfg, 'conv3d_dim', 64)
@@ -196,7 +198,7 @@ class MonoNet(nn.Module):
             depth[self.maxdisp - 1 - i] = (i+self.cfg.depth_min_intervals) * self.cfg.depth_interval
         self.depth = depth
 
-        # self.dispregression = disparityregression(self.maxdisp, cfg=self.cfg)
+        self.dispregression = disparityregression(self.maxdisp, cfg=self.cfg)
 
         self.CV_X_MIN, self.CV_Y_MIN, self.CV_Z_MIN = cfg.CV_X_MIN, cfg.CV_Y_MIN, cfg.CV_Z_MIN
         self.CV_X_MAX, self.CV_Y_MAX, self.CV_Z_MAX = cfg.CV_X_MAX, cfg.CV_Y_MAX, cfg.CV_Z_MAX
@@ -221,9 +223,15 @@ class MonoNet(nn.Module):
     def forward(self, left, right, calibs_fu, calibs_baseline, calibs_Proj, calibs_Proj_R=None):
         N = left.shape[0]
 
-        refimg_fea, left_rpn_feature = self.feature_extraction(left)
+        depth_feature, left_rpn_feature = self.feature_extraction(left)
+
+        # depth_feature decode
+        full_depth_feature = F.interpolate(depth_feature, scale_factor=4, mode="bilinear", align_corners=True)
+        depth_prob = F.softmax(full_depth_feature, dim=1)
+        depth_pred = self.dispregression(depth_prob, depth=self.depth.cuda())
 
         outputs = dict()
+        outputs['depth_preds'] = depth_pred
 
         # if self.PlaneSweepVolume:
         #     affine_mat = self.affine_mat.cuda().clone().unsqueeze(0).repeat(N, 1, 1, 1)
@@ -281,7 +289,7 @@ class MonoNet(nn.Module):
         outputs['norm_coord_imgs'] = norm_coord_imgs
         outputs['coord_rect'] = coord_rect
 
-        outputs['occupancy_preds'] = []
+        # outputs['occupancy_preds'] = []
 
         valids = (norm_coord_imgs[..., 0] >= -1.) & (norm_coord_imgs[..., 0] <= 1.) & \
                 (norm_coord_imgs[..., 1] >= -1.) & (norm_coord_imgs[..., 1] <= 1.) & \
@@ -292,22 +300,22 @@ class MonoNet(nn.Module):
         # build 3D Volume
         grid = norm_coord_imgs.clone().detach()
         grid[..., 2] = 0        # set z axis to 0, because of the image feature map doesn't have z axis
-        Voxel = F.grid_sample(refimg_fea.unsqueeze(2), grid, align_corners=True)
-        Voxel = Voxel * valids[:, None, :, :, :]
+        # Voxel = F.grid_sample(refimg_fea.unsqueeze(2), grid, align_corners=True)
+        # Voxel = Voxel * valids[:, None, :, :, :]
 
         # 3D Conv
-        cost0 = self.dres0(Voxel)
-        cost0 = self.dres1(cost0) + cost0
-        out1, pre1, post1 = self.dres2(cost0, None, None)
-        out1 = out1 + cost0
+        # cost0 = self.dres0(Voxel)
+        # cost0 = self.dres1(cost0) + cost0
+        # out1, pre1, post1 = self.dres2(cost0, None, None)
+        # out1 = out1 + cost0
 
         # depth head
-        pred_occupancy = self.classif1(out1)
+        # pred_occupancy = self.classif1(out1)
         # cost1 = F.upsample(cost1, [self.maxdisp, left.size()[2], left.size()[3]], mode='trilinear', align_corners=self.cfg.align_corners)
         # cost1 = torch.squeeze(cost1, 1)             # (N, 192, 20, 304)
         # pred_occupancy = torch.sigmoid(cost1)
-        pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)                        #(N ,192, 20, 304, c)
-        outputs['occupancy_preds'] = pred_occupancy
+        # pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)                        #(N ,192, 20, 304, c)
+        # outputs['occupancy_preds'] = pred_occupancy
 
         # if self.PlaneSweepVolume and self.loss_disp:
         #     if self.hg_cv:
@@ -337,12 +345,15 @@ class MonoNet(nn.Module):
             #     CV_feature =out1                
 
             rpn_img_feature =  F.grid_sample(left_rpn_feature.unsqueeze(2), grid, align_corners=True)   
-            att_pred_occupancy = pred_occupancy.detach().permute(0, 4, 1, 2, 3)                 # (N, c, d, h, w)
-            att_pred_occupancy = torch.sigmoid(att_pred_occupancy) * valids[:, None, :, :, :]
-            rpn_img_feature = rpn_img_feature * att_pred_occupancy
+            # att_pred_occupancy = pred_occupancy.detach().permute(0, 4, 1, 2, 3)                 # (N, c, d, h, w)
+            # att_pred_occupancy = torch.sigmoid(att_pred_occupancy) * valids[:, None, :, :, :]
+            # rpn_img_feature = rpn_img_feature * att_pred_occupancy
+            
+            # depth_prob: (N, d, h_img, w_img);  norm_coord_imgs: (N, d, h, w, 3)
+            depth_voxels_prob = F.grid_sample(depth_prob.unsqueeze(1), norm_coord_imgs.detach(), align_corners=True)      
 
-            rpn_voxel_feature = torch.cat([out1, rpn_img_feature], dim=1) 
-            rpn_voxel_feature = rpn_voxel_feature * valids[:, None, :, :, :]
+            # rpn_voxel_feature = torch.cat([out1, rpn_img_feature], dim=1) 
+            rpn_voxel_feature = rpn_img_feature * depth_voxels_prob.detach() * valids[:, None, :, :, :].detach()
 
             # if self.voxel_attentionbydisp:
             #     att_pred_occupancy = pred_occupancy.permute(0, 4, 1, 2, 3).detach() * valids[:, None, :, :, :]

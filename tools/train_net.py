@@ -1,3 +1,4 @@
+# from dsgn.utils.torch_utils import generate_coord
 from __future__ import print_function
 
 import argparse
@@ -20,6 +21,7 @@ from dsgn.dataloader import KITTILoader3D as ls
 from dsgn.dataloader import KITTILoader_dataset3d as DA
 # from dsgn.models import *
 from dsgn.build_model import build_model
+from dsgn.utils.numpy_utils import generate_depth_map_from_rect_points
 
 from env_utils import *
 
@@ -154,7 +156,7 @@ def main_worker(gpu, ngpus_per_node, args, cfg, exp):
         # ourselves based on the total number of GPUs we have
         args.btrain = int(args.btrain / ngpus_per_node)
         args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu], find_unused_parameters=True)
     elif ngpus_per_node > 1:
         model = torch.nn.DataParallel(model).cuda()
     else:
@@ -255,22 +257,6 @@ def main_worker(gpu, ngpus_per_node, args, cfg, exp):
             logger.info('Snapshot {} epoch in {}'.format(epoch, args.savemodel))
 
 
-def generate_depth_map_from_rect_points(pc_rect, height, width, calib):
-    pts_2d = calib.project_rect_to_image(pc_rect)
-    fov_inds = (pts_2d[:, 0] < width - 1) & (pts_2d[:, 0] >= 0) & \
-               (pts_2d[:, 1] < height - 1) & (pts_2d[:, 1] >= 0)
-    fov_inds = fov_inds & (pc_rect[:, 2] > 2)       # depth > 2
-    imgfov_pc_rect = pc_rect[fov_inds, :]
-    imgfov_pts_2d = pts_2d[fov_inds, :]
-    # imgfov_pc_rect = calib.project_velo_to_rect(imgfov_pc_rect)       # get rect depth
-    depth_map = np.zeros((height, width)) - 1           # set -1 for default
-    imgfov_pts_2d = np.round(imgfov_pts_2d).astype(int)
-    for i in range(imgfov_pts_2d.shape[0]):
-        depth = imgfov_pc_rect[i, 2]
-        depth_map[int(imgfov_pts_2d[i, 1]), int(imgfov_pts_2d[i, 0])] = depth
-    return depth_map
-
-
 def train(model, cfg, args, optimizer, imgL, imgR, disp_L, calib=None, calib_R=None, 
     image_indexes=None, targets=None, ious=None, labels_map=None, depth_points=None, 
     flip_infos=None, image_sizes=None):
@@ -303,7 +289,7 @@ def train(model, cfg, args, optimizer, imgL, imgR, disp_L, calib=None, calib_R=N
         calibs_Proj_R = None
 
     # ---------
-    mask = (disp_true > cfg.min_depth) & (disp_true <= cfg.max_depth)
+    mask = (disp_true >= cfg.min_depth) & (disp_true < cfg.max_depth)
     mask.detach_()
     # ---------
 
@@ -322,124 +308,135 @@ def train(model, cfg, args, optimizer, imgL, imgR, disp_L, calib=None, calib_R=N
             disp_loss += weight[3 - len(depth_preds) + i]  * F.smooth_l1_loss(o[mask], disp_true[mask], size_average=True)
         loss_dict.update(disp_loss=disp_loss)
         # loss += disp_loss
-    
+
     if getattr(cfg, 'mono', False):
-        occupancy_preds = outputs['occupancy_preds']        # (N, 192, 20, 304)
-        norm_coord_imgs = outputs['norm_coord_imgs'] 
+        if getattr(cfg, 'depth_map', False):
+            depth_preds = outputs['depth_preds']
+            depth_loss = F.smooth_l1_loss(depth_preds[mask], disp_true[mask], size_average=True)
 
-        coord_rect = outputs['coord_rect']                  # z axis is 40.3 -> 2.1
-        # upper_coord_rect = coord_rect.clone().detach()
-        # upper_coord_rect[..., 2] -= cfg.VOXEL_Z_SIZE / 2    # z axis is 40.4 -> 2.2
-
-        # lower_coord_rect = coord_rect.clone().detach()
-        # lower_coord_rect[..., 2] += cfg.VOXEL_Z_SIZE / 2    # z axis is 40.2 -> 2.0
-
-        occupancy_loss = 0.
-
-        # Project the depth points to rect coord, if the point locate in the voxel, set mask to true
-        positive_masks = []
-        merged_depth_maps = []
-        for i, depth_points_i in enumerate(depth_points):
-            depth_points_i = depth_points_i.cuda()
-            z_idxs = ((depth_points_i[:, 2] - cfg.Z_MIN) / cfg.VOXEL_Z_SIZE).to(torch.long)
-            y_idxs = ((depth_points_i[:, 1] - cfg.Y_MIN) / cfg.VOXEL_Y_SIZE).to(torch.long)
-            x_idxs = ((depth_points_i[:, 0] - cfg.X_MIN) / cfg.VOXEL_X_SIZE).to(torch.long)
-
-            mask_i = torch.zeros(coord_rect.size()[:3], device=coord_rect.device)
-            mask_i[z_idxs, y_idxs, x_idxs] = 1
-            positive_masks.append(mask_i)
-
-            # reproject the positive voxels to a new depth map. Because the depth points downsampled as voxels center shift the position.
-            # And choose the max value with the original depth map, which gets a dense depth map.
-            # By this way, we can set the voxels which along the positive voxel's center ray as negative. 
-            voxels_center = coord_rect[mask_i.to(torch.bool), :]
-            img_h, img_w = image_sizes[i]
-            voxels_depth_map = generate_depth_map_from_rect_points(voxels_center.detach().cpu().numpy(), img_h, img_w, calib[i])
-
-            # debug
-            # save_path = f"./outputs/debug/{image_indexes[i]:06d}.png"
-            # skimage.io.imsave(save_path,(voxels_depth_map).astype('uint16'))
-
-            merged_depth_map = torch.from_numpy(voxels_depth_map).to(disp_true.device)
-            depth_h, depth_w = disp_true[i].size()
-            merged_depth_map = F.pad(merged_depth_map, (0, depth_w - img_w, 0, depth_h - img_h), 'constant', -389.63037)
-            merged_depth_map = torch.max(merged_depth_map.to(torch.float), disp_true[i])
-            merged_depth_maps.append(merged_depth_map)
-
-            # debug
-            # save_path = f"./outputs/debug/{image_indexes[i]:06d}.png"
-            # skimage.io.imsave(save_path,(merged_depth_map.detach().cpu().numpy()).astype('uint16'))
-
-        positive_masks = torch.stack(positive_masks, dim=0).to(torch.bool)
-        merged_depth_maps = torch.stack(merged_depth_maps, dim=0)
-        
-        grid = norm_coord_imgs.clone().detach()
-        grid[..., 2] = 0        # set z axis to 0, because of the image feature map doesn't have z axis
-        depth_volume = F.grid_sample(merged_depth_maps.unsqueeze(1).unsqueeze(2), 
-                                     grid, 
-                                     mode='nearest', 
-                                     padding_mode='zeros', 
-                                     align_corners=True
-                                     )
-        
-        # Only match the right depth voxeles is positive
-        # positive_mask = (depth_volume.squeeze() <= upper_coord_rect[..., 2]) & \
-        #                 (depth_volume.squeeze() > lower_coord_rect[..., 2])
-
-        # Negative voxels are depth >= 0 and not match the voxel depth. 
-        # Depth equals to 0 means the voxel are padded by grid_sample, which should be negative.
-        # Ignore voxels are depth < 0
-        # Attentation: set the padding area to ignored which can balance the positive points and negative points
-        ignore_mask = (depth_volume <= 0).squeeze()          # N, 192, 20, 304
-        valid_mask = ~ignore_mask
-        valid_mask = valid_mask | positive_masks
-        ignore_mask = ~valid_mask
-        
-        occupancy_gt = torch.zeros_like(occupancy_preds)
-        occupancy_gt[positive_masks] = 1                     # set true
-
-        # debug
-        # for i, img_idx in enumerate(image_indexes):
-        #     gt_i = coord_rect[positive_masks[i], :].cpu().numpy()
-        #     save_path = f"./outputs/debug/{img_idx:06d}.npy"
-        #     np.save(save_path, gt_i)
-
-        #     gt_ignore = coord_rect[ignore_mask[i], :].cpu().numpy()
-        #     save_path = f"./outputs/debug/{img_idx:06d}_ignore.npy"
-        #     np.save(save_path, gt_ignore)
-
-        #     gt_valid = coord_rect[valid_mask[i], :].cpu().numpy()
-        #     save_path = f"./outputs/debug/{img_idx:06d}_valid.npy"
-        #     np.save(save_path, gt_valid)
-
-        #     # save pred as 3d points
-        #     pred_occupancy_i =torch.sigmoid(occupancy_preds[i]).detach()
-        #     pred_mask = pred_occupancy_i > 0.5
-        #     pred_voxels = coord_rect[pred_mask.squeeze()].cpu().numpy()
-        #     save_path = f"./outputs/debug/{img_idx:06d}_pred.npy"
-        #     np.save(save_path, pred_voxels)
-           
-        num_pos = positive_masks.sum().item()
-        g_loss_normalizer = 0.9 * g_loss_normalizer + (1 - 0.9) * max(num_pos, 1)            
-
-        if getattr(cfg, "occupancy_loss", "BCELoss") == "BCELoss":
-            # bce loss
-            occupancy_loss = F.binary_cross_entropy_with_logits(
-                occupancy_preds[valid_mask], 
-                occupancy_gt[valid_mask],
-                reduction="sum",
-            ) / g_loss_normalizer
+            loss_dict.update(depth_loss=depth_loss)
         else:
-            # focal loss
-            occupancy_loss = sigmoid_focal_loss_jit(
-                occupancy_preds[valid_mask], 
-                occupancy_gt[valid_mask],
-                alpha=0.25,
-                gamma=2.0,
-                reduction="sum",
-            ) / g_loss_normalizer
+            # OCCUPANCY PRED
+            occupancy_preds = outputs['occupancy_preds']        # (N, 192, 20, 304)
+            norm_coord_imgs = outputs['norm_coord_imgs'] 
 
-        loss_dict.update(occupancy_loss = occupancy_loss)
+            coord_rect = outputs['coord_rect']                  # z axis is 40.3 -> 2.1
+            # upper_coord_rect = coord_rect.clone().detach()
+            # upper_coord_rect[..., 2] -= cfg.VOXEL_Z_SIZE / 2    # z axis is 40.4 -> 2.2
+
+            # lower_coord_rect = coord_rect.clone().detach()
+            # lower_coord_rect[..., 2] += cfg.VOXEL_Z_SIZE / 2    # z axis is 40.2 -> 2.0
+
+            occupancy_loss = 0.
+
+            # Project the depth points to rect coord, if the point locate in the voxel, set mask to true
+            positive_masks = []
+            merged_depth_maps = []
+            for i, depth_points_i in enumerate(depth_points):
+                depth_points_i = depth_points_i.cuda()
+                z_idxs = ((depth_points_i[:, 2] - cfg.Z_MIN) / cfg.VOXEL_Z_SIZE).to(torch.long)
+                y_idxs = ((depth_points_i[:, 1] - cfg.Y_MIN) / cfg.VOXEL_Y_SIZE).to(torch.long)
+                x_idxs = ((depth_points_i[:, 0] - cfg.X_MIN) / cfg.VOXEL_X_SIZE).to(torch.long)
+
+                mask_i = torch.zeros(coord_rect.size()[:3], device=coord_rect.device)
+                mask_i[z_idxs, y_idxs, x_idxs] = 1
+                positive_masks.append(mask_i)
+
+                # reproject the positive voxels to a new depth map. Because the depth points downsampled as voxels center shift the position.
+                # And choose the max value with the original depth map, which gets a dense depth map.
+                # By this way, we can set the voxels which along the positive voxel's center ray as negative. 
+                voxels_center = coord_rect[mask_i.to(torch.bool), :]
+                img_h, img_w = image_sizes[i]
+                voxels_depth_map = generate_depth_map_from_rect_points(voxels_center.detach().cpu().numpy(), 
+                                                                    img_h, 
+                                                                    img_w, 
+                                                                    calib[i],
+                                                                    min_depth=cfg.Z_MAX)
+
+                # debug
+                # save_path = f"./outputs/debug/{image_indexes[i]:06d}.png"
+                # skimage.io.imsave(save_path,(voxels_depth_map).astype('uint16'))
+
+                merged_depth_map = torch.from_numpy(voxels_depth_map).to(disp_true.device)
+                depth_h, depth_w = disp_true[i].size()
+                merged_depth_map = F.pad(merged_depth_map, (0, depth_w - img_w, 0, depth_h - img_h), 'constant', -389.63037)
+                merged_depth_map = torch.max(merged_depth_map.to(torch.float), disp_true[i])
+                merged_depth_maps.append(merged_depth_map)
+
+                # debug
+                # save_path = f"./outputs/debug/{image_indexes[i]:06d}.png"
+                # skimage.io.imsave(save_path,(merged_depth_map.detach().cpu().numpy()).astype('uint16'))
+
+            positive_masks = torch.stack(positive_masks, dim=0).to(torch.bool)
+            merged_depth_maps = torch.stack(merged_depth_maps, dim=0)
+            
+            grid = norm_coord_imgs.clone().detach()
+            grid[..., 2] = 0        # set z axis to 0, because of the image feature map doesn't have z axis
+            depth_volume = F.grid_sample(merged_depth_maps.unsqueeze(1).unsqueeze(2), 
+                                        grid, 
+                                        mode='nearest', 
+                                        padding_mode='zeros', 
+                                        align_corners=True
+                                        )
+            
+            # Only match the right depth voxeles is positive
+            # positive_mask = (depth_volume.squeeze() <= upper_coord_rect[..., 2]) & \
+            #                 (depth_volume.squeeze() > lower_coord_rect[..., 2])
+
+            # Negative voxels are depth >= 0 and not match the voxel depth. 
+            # Depth equals to 0 means the voxel are padded by grid_sample, which should be negative.
+            # Ignore voxels are depth < 0
+            # Attentation: set the padding area to ignored which can balance the positive points and negative points
+            ignore_mask = (depth_volume <= 0).squeeze()          # N, 192, 20, 304
+            valid_mask = ~ignore_mask
+            valid_mask = valid_mask | positive_masks
+            ignore_mask = ~valid_mask
+            
+            occupancy_gt = torch.zeros_like(occupancy_preds)
+            occupancy_gt[positive_masks] = 1                     # set true
+
+            # debug
+            # for i, img_idx in enumerate(image_indexes):
+            #     gt_i = coord_rect[positive_masks[i], :].cpu().numpy()
+            #     save_path = f"./outputs/debug/{img_idx:06d}.npy"
+            #     np.save(save_path, gt_i)
+
+            #     gt_ignore = coord_rect[ignore_mask[i], :].cpu().numpy()
+            #     save_path = f"./outputs/debug/{img_idx:06d}_ignore.npy"
+            #     np.save(save_path, gt_ignore)
+
+            #     gt_valid = coord_rect[valid_mask[i], :].cpu().numpy()
+            #     save_path = f"./outputs/debug/{img_idx:06d}_valid.npy"
+            #     np.save(save_path, gt_valid)
+
+            #     # save pred as 3d points
+            #     pred_occupancy_i =torch.sigmoid(occupancy_preds[i]).detach()
+            #     pred_mask = pred_occupancy_i > 0.5
+            #     pred_voxels = coord_rect[pred_mask.squeeze()].cpu().numpy()
+            #     save_path = f"./outputs/debug/{img_idx:06d}_pred.npy"
+            #     np.save(save_path, pred_voxels)
+            
+            num_pos = positive_masks.sum().item()
+            g_loss_normalizer = 0.9 * g_loss_normalizer + (1 - 0.9) * max(num_pos, 1)            
+
+            if getattr(cfg, "occupancy_loss", "BCELoss") == "BCELoss":
+                # bce loss
+                occupancy_loss = F.binary_cross_entropy_with_logits(
+                    occupancy_preds[valid_mask], 
+                    occupancy_gt[valid_mask],
+                    reduction="sum",
+                ) / g_loss_normalizer
+            else:
+                # focal loss
+                occupancy_loss = sigmoid_focal_loss_jit(
+                    occupancy_preds[valid_mask], 
+                    occupancy_gt[valid_mask],
+                    alpha=0.25,
+                    gamma=2.0,
+                    reduction="sum",
+                ) / g_loss_normalizer
+
+            loss_dict.update(occupancy_loss = occupancy_loss)
 
     if cfg.RPN3D_ENABLE:
         bbox_cls, bbox_reg, bbox_centerness = outputs['bbox_cls'], outputs['bbox_reg'], outputs['bbox_centerness']

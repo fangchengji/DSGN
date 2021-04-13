@@ -61,4 +61,23 @@ def get_dimensions(corners):
 
     return [height, width, length, rotation_y]
 
-
+def generate_depth_map_from_rect_points(pc_rect, height, width, calib, min_depth=2):
+    pts_2d = calib.project_rect_to_image(pc_rect)
+    fov_inds = (pts_2d[:, 0] < width) & (pts_2d[:, 0] >= 0) & \
+               (pts_2d[:, 1] < height) & (pts_2d[:, 1] >= 0)
+    fov_inds = fov_inds & (pc_rect[:, 2] >= min_depth)       # depth > 2
+    imgfov_pc_rect = pc_rect[fov_inds, :]
+    imgfov_pts_2d = pts_2d[fov_inds, :]
+    depth_map = np.zeros((height, width)) + 1000           # set 1000 for default
+    imgfov_pts_2d = np.round(imgfov_pts_2d).astype(int)
+    # clip to image width and height
+    imgfov_pts_2d[:, 0] = np.clip(imgfov_pts_2d[:, 0], 0, width - 1)
+    imgfov_pts_2d[:, 1] = np.clip(imgfov_pts_2d[:, 1], 0, height - 1)
+    for i in range(imgfov_pts_2d.shape[0]):
+        depth = imgfov_pc_rect[i, 2]
+        # Use the min depth if more than one points projected to the same image pixel 
+        depth_map[imgfov_pts_2d[i, 1], imgfov_pts_2d[i, 0]] = min(depth, 
+                                                                  depth_map[imgfov_pts_2d[i, 1], imgfov_pts_2d[i, 0]])
+    depth_map[depth_map == 1000] = -1       # set -1 for default
+    
+    return depth_map

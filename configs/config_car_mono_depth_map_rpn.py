@@ -1,4 +1,3 @@
-from dsgn.models.plume import PLUMENet
 import os
 import numpy as np
 from yacs.config import CfgNode as CN
@@ -6,8 +5,8 @@ from yacs.config import CfgNode as CN
 cfg = CN()
 
 cfg.mono = True
-cfg.model = "PLUMENet"
-cfg.depth_map = False
+cfg.depth_map = True
+cfg.model = "DepthNet"
 
 cfg.cnt = 0
 
@@ -42,13 +41,11 @@ cfg.min_depth = cfg.depth_min_intervals * cfg.depth_interval            # 2m
 cfg.loss_disp = True
 cfg.flip = True
 
-cfg.occupancy_loss = "BCELoss"          # BCELoss or FocalLoss
-
 #------------- detection ---------------#
-cfg.RPN_CONVDIM = 32
+cfg.RPN_CONVDIM = 64
 cfg.RPN_ONEMORE_CONV = True
 cfg.RPN_ONEMORE_DIM = 64
-cfg.RPN3D_ENABLE = False
+cfg.RPN3D_ENABLE = True
 
 cfg.RPN3D = CN()
 cfg.RPN3D.ANCHORS_Y = [0.74, 0.825, 0.74]
@@ -59,9 +56,9 @@ cfg.RPN3D.ANCHORS_LENGTH = [0.8, 3.9, 1.76]
 cfg.RPN3D.PRIOR_PROB = 0.01 # RetinaNet
 cfg.RPN3D.FOCAL_GAMMA = 2.0
 cfg.RPN3D.FOCAL_ALPHA = 0.25
-cfg.RPN3D.PRE_NMS_THRESH = 0.05
+cfg.RPN3D.PRE_NMS_THRESH = 0.3     # 0.05 default
 cfg.RPN3D.PRE_NMS_TOP_N = 300
-cfg.RPN3D.NMS_THRESH = 0.6 # [0.6, 0.6, 0.45]
+cfg.RPN3D.NMS_THRESH = 0.45 # [0.6, 0.6, 0.45]
 cfg.RPN3D.POST_NMS_TOP_N = 30
 cfg.RPN3D.NUM_CONVS = 2
 cfg.RPN3D.NUM_3DCONVS = 1

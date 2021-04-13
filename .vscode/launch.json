@@ -28,10 +28,10 @@
             "program": "${workspaceRoot}/tools/train_net.py",
             "console": "integratedTerminal",
             "args": [
-                "--cfg", "configs/config_car_mono.py",
+                "--cfg", "configs/config_car_mono_depth_map_rpn.py",
                 "--savemodel", "./outputs/dsgn_car_mono_debug",
                 "-btrain",  "2",
-                "-d", "0",
+                "-d", "7",
                 // "--loadmodel", "./outputs/dsgn_car_mono/finetune_53.tar"
             ]
         },
@@ -57,11 +57,13 @@
             "program": "${workspaceRoot}/tools/test_net.py",
             "console": "integratedTerminal",
             "args": [
-                "--cfg", "configs/config_car_mono.py",
-                "--loadmodel", "./outputs/dsgn_car_mono_rpn64/finetune_10.tar",
-                "-btest",  "4",
-                "-d", "0",
-                "--save_occupancy",
+                "--cfg", "configs/config_car_mono_depth_map.py",
+                "--loadmodel", "./outputs/dsgn_car_mono_depth_map/finetune_53.tar",
+                "-btest",  "8",
+                "-d", "3",
+                // "--save_depth_map",
+                // "--save_occupancy",
+                // "--train"
                 // "--loadmodel", "./outputs/dsgn_car_mono/finetune_53.tar"
             ]
         },

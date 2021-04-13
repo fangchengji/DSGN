@@ -29,6 +29,8 @@ from env_utils import *
 from dsgn.models.inference3d import make_fcos3d_postprocessor
 
 import scipy.misc as ssc
+import skimage.io
+
 
 parser = argparse.ArgumentParser(description='PSMNet')
 parser.add_argument('-cfg', '--cfg', '--config',
@@ -131,6 +133,9 @@ TestImgLoader = torch.utils.data.DataLoader(
 
 model = build_model(cfg)
 
+# model = nn.DataParallel(model)
+# model.cuda()
+
 if args.loadmodel is not None and args.loadmodel.endswith('tar'):
     state_dict = torch.load(args.loadmodel)
     model.load_state_dict(state_dict['state_dict'], strict=True)
@@ -144,16 +149,20 @@ print('Number of model parameters: {}'.format(
 model = nn.DataParallel(model)
 model.cuda()
 
-
 def test(imgL, imgR, image_sizes=None, calibs_fu=None, calibs_baseline=None, calibs_Proj=None, calibs_Proj_R=None):
     model.eval()
     with torch.no_grad():
         outputs = model(imgL, imgR, calibs_fu, calibs_baseline,
                         calibs_Proj, calibs_Proj_R=calibs_Proj_R)
-    pred_occupancy = outputs['occupancy_preds']
-    coord_rect = outputs['coord_rect']
+    
+    if cfg.depth_map:
+        pred_depth = outputs["depth_preds"]
+        rets = [pred_depth]
+    else:
+        pred_occupancy = outputs['occupancy_preds']
+        coord_rect = outputs['coord_rect']
 
-    rets = [pred_occupancy, coord_rect]
+        rets = [pred_occupancy, coord_rect]
 
     if cfg.RPN3D_ENABLE:
         box_pred = make_fcos3d_postprocessor(cfg)(
@@ -181,14 +190,16 @@ def error_estimating(pred_disp, ground_truth, maxdisp=192):
 
 
 def depth_error_estimating(pred_disp, ground_truth, maxdisp=70,
-                           depth_disp=False, calib_batch=None, calib_R_batch=None):
+                           depth_disp=False, calib_batch=None, 
+                           calib_R_batch=None, pred_mask=False):
     all_err = 0.
     all_err_med = 0.
     for i in range(len(pred_disp)):
         gt = ground_truth[i]
         disp = pred_disp[i]
         calib = calib_batch[i]
-        calib_R = calib_R_batch[i]
+        if calib_R_batch is not None:
+            calib_R = calib_R_batch[i]
 
         if not depth_disp:
             baseline = (calib.P[0, 3] - calib_R.P[0, 3]) / \
@@ -200,7 +211,12 @@ def depth_error_estimating(pred_disp, ground_truth, maxdisp=70,
         else:
             # ignore points outside max-depth
             mask = (gt > 0) & (gt < cfg.max_depth)
+        
+        # only calculate the pred points depth
+        if pred_mask:
+            mask = mask & (disp > 0)
 
+        print(f"Find {mask.sum()} matched prediction depth and ground truth depth pixel ...")
         if mask.sum() > 0:
             errmap = torch.abs(disp - gt)
             err3 = errmap[mask].mean()
@@ -325,11 +341,37 @@ def main():
         cfg.time = time.time()
         output = test(imgL, None, image_sizes=image_sizes, calibs_fu=calibs_fu,
                       calibs_baseline=None, calibs_Proj=calibs_Proj, calibs_Proj_R=None)
-        pred_disp, coord_rect = output[0], output[1]
+
+        if cfg.depth_map:
+            pred_depth = output[0]
+
+            if cfg.eval_depth:
+                err, batch, err_med = depth_error_estimating(pred_depth, gt_disp,
+                                                             depth_disp=True, calib_batch=calib_batch, calib_R_batch=None)
+                print('Mean depth error(m): {} Median(m): {} (batch {})'.format(
+                    err / batch, err_med / batch, batch))
+                all_err += err
+                all_err_med += err_med
+
+            if args.save_depth_map:
+                if not os.path.exists('{}/depth_maps/'.format(args.save_path)):
+                    os.makedirs('{}/depth_maps/'.format(args.save_path))
+                for i in range(len(image_indexes)):
+                    np.save('{}/depth_maps/{:06d}.npy'.format(args.save_path,
+                                                          image_indexes[i]), pred_depth[i].cpu().numpy())
+                    # pred_depth is only between [2, 40] meter 
+                    scale = 255 / 40
+                    skimage.io.imsave(f"{args.save_path}/depth_maps/{image_indexes[i]:06d}.png",
+                                      (pred_depth[i]* scale).cpu().numpy().astype('uint16')
+                                      )
+        else:
+            pred_disp, coord_rect = output[0], output[1]
         
         if cfg.RPN3D_ENABLE:
             box_pred = output[-1]
             kitti_output(box_pred[0], image_indexes, output_path + '/kitti_output' + args.tag)
+            # TODO: draw the 3D BBOX in image
+
         print('time = %.2f' % (time.time() - start_time))
 
         if getattr(cfg, 'PlaneSweepVolume', True) and getattr(cfg, 'loss_disp', True):
@@ -346,7 +388,7 @@ def main():
                     print('>3px error: {} (batch {})'.format(err / batch, batch))
                     all_err += err
 
-        if args.save_depth_map:
+        if args.save_depth_map and not cfg.depth_map:
             for i in range(len(image_indexes)):
                 depth_map = project_disp_to_depth_map(calib_batch[i], 
                                                       pred_disp[i].cpu().numpy()[:image_sizes[i][0], :image_sizes[i][1]], 
@@ -373,13 +415,38 @@ def main():
 
         # save occupancy as point cloud
         if args.save_occupancy:
+            pred_depth_maps = []
             # save pred as 3d points
             for i, img_idx in enumerate(image_indexes):
                 pred_occupancy_i =torch.sigmoid(pred_disp[i])
-                pred_mask = pred_occupancy_i > 0.5
+                pred_mask = pred_occupancy_i > 0.35
                 pred_voxels = coord_rect[pred_mask.squeeze()].cpu().numpy()
                 save_path = f"{args.save_path}/{img_idx:06d}_pred.npy"
                 np.save(save_path, pred_voxels)
+
+                img_h, img_w = image_sizes[i]
+                pred_depth_map = generate_depth_map_from_rect_points(pred_voxels, 
+                                                                     img_h, 
+                                                                     img_w, 
+                                                                     calib_batch[i], 
+                                                                     min_depth=2,
+                                                                     )
+                pred_depth_maps.append(pred_depth_map)
+
+            # TODO: use merged depth map as label??
+            pred_depth_maps = [torch.from_numpy(dm).to(device=gt_disp.device) for dm in pred_depth_maps]
+            pred_depth_maps = [F.pad(dm, (0, 1248 - dm.shape[1], 0, 384 - dm.shape[0]), "constant", -1) for dm in pred_depth_maps]
+            err, batch, err_med = depth_error_estimating(pred_depth_maps, 
+                                                         gt_disp,
+                                                         depth_disp=True, 
+                                                         calib_batch=calib_batch, 
+                                                         calib_R_batch=calib_R_batch,
+                                                         pred_mask=True,
+                                                         )
+            print('Mean depth error(m): {} Median(m): {} (batch {})'.format(
+                err / batch, err_med / batch, batch))
+            all_err += err
+            all_err_med += err_med                
 
     stat = np.asarray(stat)
 

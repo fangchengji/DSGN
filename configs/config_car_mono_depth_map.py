@@ -1,4 +1,3 @@
-from dsgn.models.plume import PLUMENet
 import os
 import numpy as np
 from yacs.config import CfgNode as CN
@@ -6,8 +5,8 @@ from yacs.config import CfgNode as CN
 cfg = CN()
 
 cfg.mono = True
-cfg.model = "PLUMENet"
-cfg.depth_map = False
+cfg.depth_map = True
+cfg.model = "DepthNet"
 
 cfg.cnt = 0
 
@@ -41,8 +40,6 @@ cfg.min_depth = cfg.depth_min_intervals * cfg.depth_interval            # 2m
 
 cfg.loss_disp = True
 cfg.flip = True
-
-cfg.occupancy_loss = "BCELoss"          # BCELoss or FocalLoss
 
 #------------- detection ---------------#
 cfg.RPN_CONVDIM = 32

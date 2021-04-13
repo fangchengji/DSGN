@@ -157,6 +157,11 @@ class feature_extraction(nn.Module):
         self.branch = getattr(self.cfg, 'branch', True)
         self.mono = getattr(self.cfg, 'mono', False)
         self.out_channels = 64 if self.mono else 32
+        
+        # output dense depth map 
+        self.depth_map = getattr(self.cfg, 'depth_map', False)
+        if self.depth_map:
+            self.out_channels = 192
 
         self.backbone = getattr(self.cfg, 'backbone', 'reslike-det-small')
         if self.backbone == 'reslike-det':
@@ -169,7 +174,7 @@ class feature_extraction(nn.Module):
             first_dim = 64
             dims = [32, 64, 128, 192]
             nr_convs = [3, 6, 12, 4]
-            branch_dim = self.out_channels
+            branch_dim = 64 if self.mono else 32
             lastconv_dim = [256, self.out_channels]
         elif self.backbone == 'reslike-det-small-fixfirst':
             first_dim = 16
@@ -234,15 +239,16 @@ class feature_extraction(nn.Module):
                                           nn.ReLU(inplace=True),
                                           nn.Conv2d(lastconv_dim[0], lastconv_dim[1], kernel_size=1, padding=0, stride = 1, bias=False))
 
-        if self.cfg.RPN3D_ENABLE and self.cat_img_feature:
-            if self.rpn_onemore_conv:
-                rpnconvs = [convbn(concat_dim, self.rpn_onemore_dim, 3, 1, 1, 1, gn=cfg.GN),
-                                   nn.ReLU(inplace=True),
-                                   convbn(self.rpn_onemore_dim, self.cfg.RPN_CONVDIM, 3, 1, 1, 1, gn=cfg.GN, groups=(32 if self.cfg.RPN_CONVDIM % 32 == 0 else 16))]
-            else:
-                rpnconvs = [convbn(concat_dim, self.cfg.RPN_CONVDIM, 3, 1, 1, 1, gn=cfg.GN, groups=(32 if self.cfg.RPN_CONVDIM % 32 == 0 else 16))]
-            if self.img_feature_relu:
-                rpnconvs.append( nn.ReLU(inplace=True) )
+        if self.cfg.RPN3D_ENABLE:
+            # rpnconvs = [convbn(concat_dim, self.rpn_onemore_dim, 3, 1, 1, 1, gn=cfg.GN),
+            #             nn.ReLU(inplace=True),
+            #             convbn(self.rpn_onemore_dim, self.cfg.RPN_CONVDIM, 3, 1, 1, 1, gn=cfg.GN, groups=(32 if self.cfg.RPN_CONVDIM % 32 == 0 else 16))]
+            
+            rpnconvs = [convbn(concat_dim, self.rpn_onemore_dim, 3, 1, 1, 1, gn=cfg.GN),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(self.rpn_onemore_dim, self.cfg.RPN_CONVDIM, kernel_size=1, padding=0, stride=1, bias=False)]
+            # if self.img_feature_relu:
+            #     rpnconvs.append( nn.ReLU(inplace=True) )
             self.rpnconv = nn.Sequential( *rpnconvs )
 
     def _make_layer(self, block, planes, blocks, stride, pad, dilation, gn=False):
@@ -286,17 +292,17 @@ class feature_extraction(nn.Module):
         else:
             concat_feature = torch.cat((output_raw, output_mid, output_skip), 1)
         
-        if self.RPN3D_ENABLE and self.cat_img_feature:
+        if self.RPN3D_ENABLE:
             rpn_feature = self.rpnconv(concat_feature)
         else:
             rpn_feature = None
 
         if self.PlaneSweepVolume or self.mono:
-            output_feature = self.lastconv(concat_feature) ; #print('last', output_feature.shape)
+            depth_feature = self.lastconv(concat_feature) ; #print('last', output_feature.shape)
         else:
-            output_feature = None
+            depth_feature = None
 
-        return output_feature, rpn_feature
+        return depth_feature, rpn_feature
 
 
 class plume_feature_extraction(nn.Module):

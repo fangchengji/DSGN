@@ -5,7 +5,8 @@ from yacs.config import CfgNode as CN
 cfg = CN()
 
 cfg.mono = True
-cfg.plume = True
+cfg.model = "PLUMENet"
+cfg.depth_map = False
 
 cfg.cnt = 0
 

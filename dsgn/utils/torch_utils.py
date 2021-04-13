@@ -114,3 +114,15 @@ def convert_to_viewpoint_torch(ry, z, x):
 
 def convert_to_ry_torch(alpha, z, x):
     return alpha - torch.atan2(z, x) + np.pi / 2
+
+def generate_coord(z_min, z_max, voxel_z_size,
+                   y_min, y_max, voxel_y_size,
+                   x_min, x_max, voxel_x_size):
+
+    zs = torch.arange(z_min, z_max, voxel_z_size) + voxel_z_size / 2.
+    ys = torch.arange(y_min, y_max, voxel_y_size) + voxel_y_size / 2.
+    xs = torch.arange(x_min, x_max, voxel_x_size) + voxel_x_size / 2.
+    zs, ys, xs = torch.meshgrid(zs, ys, xs)
+    coord_rect = torch.stack([xs, ys, zs], dim=-1)
+
+    return coord_rect
